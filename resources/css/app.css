@@ -1,0 +1,248 @@
+@import 'tailwindcss';
+
+/*
+ * Smart Access Control — dashboard theme.
+ *
+ * This screen gets read during incidents, so the priorities are legibility and
+ * unambiguous status over decoration. Two rules follow from that and are
+ * enforced throughout:
+ *
+ *   1. Colour never carries meaning alone. Every status pairs a colour with an
+ *      icon and a word, because roughly one operator in twelve cannot rely on
+ *      the red/green distinction, and a control room is exactly where that
+ *      matters.
+ *   2. Denials are the signal. They get the strongest contrast on the page;
+ *      grants recede.
+ */
+
+@theme {
+    --font-sans:
+        ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+        'Helvetica Neue', Arial, sans-serif;
+    --font-mono:
+        ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+
+    --radius-panel: 0.75rem;
+}
+
+/* --------------------------------------------------------------------------
+ * Semantic tokens. Light is the base; dark redefines only what changes, so a
+ * colour can never exist in one theme and not the other.
+ * ----------------------------------------------------------------------- */
+:root {
+    color-scheme: light;
+
+    --bg: oklch(0.985 0.002 260);
+    --surface: oklch(1 0 0);
+    --surface-raised: oklch(0.995 0.001 260);
+    --surface-sunken: oklch(0.965 0.003 260);
+
+    --border: oklch(0.9 0.005 260);
+    --border-strong: oklch(0.82 0.008 260);
+
+    --text: oklch(0.22 0.012 260);
+    --text-muted: oklch(0.5 0.012 260);
+    --text-subtle: oklch(0.62 0.01 260);
+
+    --accent: oklch(0.52 0.17 265);
+    --accent-hover: oklch(0.46 0.18 265);
+    --accent-soft: oklch(0.95 0.03 265);
+    --accent-text: oklch(1 0 0);
+
+    /* Status. These are badge colours, and a badge always ships a glyph and a
+     * word beside the colour — which is not belt-and-braces but the actual
+     * mechanism: green and red at this lightness separate by only ΔE 5.1 under
+     * simulated deuteranopia, so for those readers the colour genuinely is not
+     * doing the work. The glyph is. */
+    --ok: oklch(0.55 0.14 155);
+    --ok-soft: oklch(0.95 0.04 155);
+    --ok-text: oklch(0.36 0.11 155);
+
+    --danger: oklch(0.55 0.2 25);
+    --danger-soft: oklch(0.96 0.04 25);
+    --danger-text: oklch(0.44 0.18 25);
+
+    --warn: oklch(0.7 0.15 75);
+    --warn-soft: oklch(0.96 0.05 85);
+    --warn-text: oklch(0.45 0.11 70);
+
+    --neutral: oklch(0.6 0.01 260);
+    --neutral-soft: oklch(0.94 0.004 260);
+    --neutral-text: oklch(0.4 0.01 260);
+
+    --focus: oklch(0.6 0.19 265);
+
+    /* Chart series. Deliberately NOT the green/red status pair: measured under
+     * simulated deuteranopia, green and red at equal lightness separate by only
+     * ΔE 5.1 — below the usable floor. So the trend chart uses the emphasis
+     * form instead. Denials are the signal and carry the one saturated colour;
+     * grants are context and recede to grey. That pair measures ΔE 17.1 under
+     * deuteranopia and clears 3:1 against the surface in both modes. */
+    --chart-context: oklch(0.65 0.025 260);
+    --chart-signal: oklch(0.52 0.21 25);
+    --chart-grid: oklch(0.92 0.004 260);
+}
+
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']) {
+        color-scheme: dark;
+
+        --bg: oklch(0.17 0.008 260);
+        --surface: oklch(0.21 0.01 260);
+        --surface-raised: oklch(0.245 0.012 260);
+        --surface-sunken: oklch(0.19 0.008 260);
+
+        --border: oklch(0.3 0.012 260);
+        --border-strong: oklch(0.4 0.015 260);
+
+        --text: oklch(0.95 0.005 260);
+        --text-muted: oklch(0.72 0.01 260);
+        --text-subtle: oklch(0.6 0.01 260);
+
+        --accent: oklch(0.68 0.16 265);
+        --accent-hover: oklch(0.75 0.15 265);
+        --accent-soft: oklch(0.3 0.06 265);
+        --accent-text: oklch(0.15 0.02 265);
+
+        --ok: oklch(0.72 0.15 155);
+        --ok-soft: oklch(0.28 0.05 155);
+        --ok-text: oklch(0.82 0.13 155);
+
+        --danger: oklch(0.68 0.19 25);
+        --danger-soft: oklch(0.3 0.07 25);
+        --danger-text: oklch(0.8 0.15 25);
+
+        --warn: oklch(0.78 0.14 80);
+        --warn-soft: oklch(0.3 0.06 80);
+        --warn-text: oklch(0.85 0.12 85);
+
+        --neutral: oklch(0.6 0.01 260);
+        --neutral-soft: oklch(0.28 0.008 260);
+        --neutral-text: oklch(0.75 0.008 260);
+
+        --focus: oklch(0.72 0.16 265);
+
+        --chart-context: oklch(0.57 0.025 260);
+        --chart-signal: oklch(0.66 0.2 25);
+        --chart-grid: oklch(0.28 0.01 260);
+    }
+}
+
+:root[data-theme='dark'] {
+    color-scheme: dark;
+
+    --bg: oklch(0.17 0.008 260);
+    --surface: oklch(0.21 0.01 260);
+    --surface-raised: oklch(0.245 0.012 260);
+    --surface-sunken: oklch(0.19 0.008 260);
+
+    --border: oklch(0.3 0.012 260);
+    --border-strong: oklch(0.4 0.015 260);
+
+    --text: oklch(0.95 0.005 260);
+    --text-muted: oklch(0.72 0.01 260);
+    --text-subtle: oklch(0.6 0.01 260);
+
+    --accent: oklch(0.68 0.16 265);
+    --accent-hover: oklch(0.75 0.15 265);
+    --accent-soft: oklch(0.3 0.06 265);
+    --accent-text: oklch(0.15 0.02 265);
+
+    --ok: oklch(0.72 0.15 155);
+    --ok-soft: oklch(0.28 0.05 155);
+    --ok-text: oklch(0.82 0.13 155);
+
+    --danger: oklch(0.68 0.19 25);
+    --danger-soft: oklch(0.3 0.07 25);
+    --danger-text: oklch(0.8 0.15 25);
+
+    --warn: oklch(0.78 0.14 80);
+    --warn-soft: oklch(0.3 0.06 80);
+    --warn-text: oklch(0.85 0.12 85);
+
+    --neutral: oklch(0.6 0.01 260);
+    --neutral-soft: oklch(0.28 0.008 260);
+    --neutral-text: oklch(0.75 0.008 260);
+
+    --focus: oklch(0.72 0.16 265);
+
+    --chart-context: oklch(0.57 0.025 260);
+    --chart-signal: oklch(0.66 0.2 25);
+    --chart-grid: oklch(0.28 0.01 260);
+}
+
+/* --------------------------------------------------------------------------
+ * Base
+ * ----------------------------------------------------------------------- */
+html,
+body,
+#root {
+    height: 100%;
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* A visible focus ring is not decoration — it is how a keyboard user knows
+ * which control the Enter key is about to press. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+    border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
+/* --------------------------------------------------------------------------
+ * Component primitives
+ * ----------------------------------------------------------------------- */
+@utility panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-panel);
+}
+
+@utility skip-link {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    z-index: 100;
+    padding: 0.75rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 0 0 var(--radius-panel) 0;
+
+    &:focus {
+        left: 0;
+    }
+}
+
+/* Live regions update while an operator is reading them; a hard flash is
+ * disorienting, a brief tint is not. */
+@keyframes row-enter {
+    from {
+        background-color: var(--accent-soft);
+    }
+    to {
+        background-color: transparent;
+    }
+}
+
+@utility row-enter {
+    animation: row-enter 1.2s ease-out;
+}

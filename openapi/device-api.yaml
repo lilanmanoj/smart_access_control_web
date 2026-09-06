@@ -1,0 +1,939 @@
+openapi: 3.1.0
+
+info:
+  title: Smart Access Control — Device API
+  version: 1.0.0
+  summary: The contract between an ESP32-S3 access panel and the backend.
+  description: |
+    Every path here is appended directly to the device's configured
+    `api_base_url`, which already carries the version prefix:
+
+        https://example.com/api/v1  +  /health
+
+    ### Constraints this contract is shaped by
+
+    These come from the shipped firmware and are not negotiable:
+
+    * **The keypad is a 4x3 matrix — digits, `*` and `#`.** There is no way to
+      type a letter, so every code the backend issues is six *digits*. An
+      alphanumeric code is physically unenterable at the door.
+    * **The device has no real-time clock.** Its clock reads 1970 until NTP
+      lands. The server assigns every authoritative timestamp; a device-supplied
+      wall clock is never trusted. `uptime_ms` orders events within one batch
+      and nothing more.
+    * **Fingerprint templates live in the sensor's own flash.** Slot ids are
+      device-local integers `0 … capacity-1` and survive reboots and reflashes.
+      The backend records who owns a slot; it can never move a template.
+    * **The device must keep working while offline.** Events are queued in
+      flash and flushed on reconnect, so this API accepts batched, replayed
+      submissions with an idempotency key.
+    * **Phone numbers are capped at 14 characters** in device storage. Numbers
+      are normalised to E.164 server-side and anything that will not fit is
+      refused.
+
+    ### Two contract changes from the original design
+
+    1. `POST /otp-requests` **no longer returns the code.** It returns an
+       `otp_request_id`; the backend delivers the code over SMS and e-mail, and
+       the device submits what the user typed to `POST /otp-verifications`.
+       Under the old shape, anyone holding a device credential could request a
+       code for any phone number and read it straight out of the response.
+    2. `POST /access-events` is new and is the core of the system. A fingerprint
+       match previously opened the door and logged only to the device's serial
+       console.
+
+  contact:
+    name: Smart Access Control
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://example.com/api/v1
+    description: Production
+  - url: http://localhost:8000/api/v1
+    description: Local development (docker compose)
+
+security:
+  - DeviceId: []
+    ApiKey: []
+    ApiSecret: []
+
+tags:
+  - name: Health
+    description: Liveness, heartbeat, clock source and command channel.
+  - name: Access
+    description: The audit trail — every access decision at every door.
+  - name: Enrolment
+    description: Registering a person at the panel.
+  - name: OTP
+    description: One-time passwords.
+  - name: Backup codes
+    description: The method that keeps working when the network does not.
+  - name: Commands
+    description: Backend-to-device operations.
+
+paths:
+  # ==========================================================================
+  /health:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: Liveness probe, heartbeat, clock and queued commands
+      description: |
+        Polled every 30 seconds while the panel is up and every 10 while it
+        thinks it is down, which makes it the one call guaranteed to happen.
+        Three things ride along on it:
+
+        * `server_time` — the device has no RTC, so this is its only route to a
+          real clock;
+        * the heartbeat that tells the dashboard a door has gone dark;
+        * any queued commands, so revocation and remote unlock work without a
+          second endpoint.
+
+        The firmware requires **both** a 200 and `"status": "ok"` exactly.
+        Extra fields are ignored by older builds.
+      parameters:
+        - { $ref: '#/components/parameters/FirmwareVersion' }
+        - { $ref: '#/components/parameters/UptimeMs' }
+        - { $ref: '#/components/parameters/EnrolledCount' }
+        - { $ref: '#/components/parameters/TemplateCapacity' }
+      responses:
+        '200':
+          description: The backend is reachable.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, server_time]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                    description: The firmware checks for this exact value.
+                  server_time:
+                    type: string
+                    format: date-time
+                    examples: ['2026-09-06T10:15:00Z']
+                  device:
+                    $ref: '#/components/schemas/DeviceIdentity'
+                  commands:
+                    type: array
+                    description: Queued commands, collected by this poll.
+                    items: { $ref: '#/components/schemas/Command' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  # ==========================================================================
+  /access-events:
+    post:
+      tags: [Access]
+      operationId: recordAccessEvents
+      summary: Record one access decision, or a batch flushed from the queue
+      description: |
+        **The most important endpoint in the system.** Every access decision at
+        the door arrives here — a fingerprint grant or denial at the main
+        screen, an OTP result, a backup-code result, an admin-auth result.
+
+        `idempotency_key` is device-generated and unique per device. An offline
+        panel resends its queue, sometimes more than once; replays are silently
+        deduplicated and reported in `duplicates` rather than treated as
+        errors.
+
+        `occurred_at` is assigned by the server on receipt. `uptime_ms` orders
+        events inside one batch and is never treated as a wall clock.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [events]
+              properties:
+                device_id:
+                  $ref: '#/components/schemas/DeviceIdClaim'
+                events:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items: { $ref: '#/components/schemas/AccessEventSubmission' }
+            examples:
+              offlineFlush:
+                summary: A panel flushing two queued events after reconnecting
+                value:
+                  device_id: SMA_4821
+                  events:
+                    - idempotency_key: SMA_4821-000000123
+                      method: fingerprint
+                      result: granted
+                      reason: matched
+                      fingerprint_slot: 7
+                      confidence: 142
+                      uptime_ms: 1234567
+                    - idempotency_key: SMA_4821-000000124
+                      method: backup_code
+                      result: denied
+                      reason: code_invalid
+                      uptime_ms: 1240000
+      responses:
+        '202':
+          description: Accepted. Duplicates are a success, not an error.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted, duplicates]
+                properties:
+                  accepted: { type: integer, examples: [1] }
+                  duplicates:
+                    type: integer
+                    description: Replayed or suppressed rows.
+                    examples: [1]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  # ==========================================================================
+  /authentications:
+    post:
+      tags: [Access]
+      operationId: authenticateAdministrator
+      summary: The Admin Settings gate
+      description: |
+        Asks whether a matched fingerprint belongs to an administrator, before
+        the panel exposes its own configuration portal. This is not a way
+        through the door.
+
+        The firmware grants **only** on `"is_admin": true`. Anything else — a
+        non-200, a missing field, a transport failure — denies, and the flow is
+        refused outright when the backend is unreachable.
+
+        Every call is written to the access log with `method: admin_auth`,
+        granted or not.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enrollment_id]
+              properties:
+                device_id: { $ref: '#/components/schemas/DeviceIdClaim' }
+                enrollment_id:
+                  type: integer
+                  minimum: 0
+                  maximum: 65535
+                  description: |
+                    Named `enrollment_id` by the firmware, but it carries the
+                    **device-local fingerprint slot**, not a member or
+                    enrolment id.
+                  examples: [12]
+      responses:
+        '200':
+          description: |
+            The decision. Always 200 — "not an administrator" is an answer, not
+            a transport failure.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [is_admin]
+                properties:
+                  is_admin: { type: boolean }
+                  member:
+                    type: object
+                    description: Present only when `is_admin` is true.
+                    properties:
+                      member_id: { type: string, format: uuid }
+                      full_name: { type: string, examples: ['Jane Doe'] }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ==========================================================================
+  /enrollments:
+    post:
+      tags: [Enrolment]
+      operationId: createEnrollment
+      summary: Begin an enrolment from a freshly stored template
+      description: |
+        The panel writes a template into its sensor's flash and reports which
+        slot it used. The member is created without a phone number; the device
+        captures that on the next screen, so the enrolment is `pending` until
+        then.
+
+        `fingerprint_slot` may be null: the user skipped the finger, or
+        registration failed and the template was rolled back.
+
+        **Naming:** the firmware currently calls the returned id `user_id`.
+        Here it is `member_id` — `user` means a dashboard operator.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                device_id: { $ref: '#/components/schemas/DeviceIdClaim' }
+                fingerprint_slot:
+                  type: [integer, 'null']
+                  minimum: 0
+                  maximum: 65535
+                  examples: [7]
+      responses:
+        '201':
+          description: Enrolment started.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [member_id, enrollment_id, status]
+                properties:
+                  member_id: { type: string, format: uuid }
+                  enrollment_id: { type: string, format: uuid }
+                  status: { type: string, const: pending }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /enrollments/{memberId}:
+    patch:
+      tags: [Enrolment]
+      operationId: attachPhoneToEnrollment
+      summary: Attach the captured phone number, activating the enrolment
+      parameters:
+        - name: memberId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+          description: The `member_id` returned by `POST /enrollments`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                device_id: { $ref: '#/components/schemas/DeviceIdClaim' }
+                phone:
+                  type: string
+                  description: |
+                    Normalised to E.164 server-side, so `0771234567` and
+                    `+94771234567` both work. Refused if the normalised form
+                    exceeds the 14 characters the panel can store.
+                  examples: ['+94771234567']
+                fingerprint_slot:
+                  type: [integer, 'null']
+                  examples: [7]
+      responses:
+        '200':
+          description: Enrolment activated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  member_id: { type: string, format: uuid }
+                  enrollment_id: { type: string, format: uuid }
+                  status: { type: string, const: active }
+        '404':
+          description: No such member in this device's tenant.
+        '409':
+          description: That phone number already belongs to another member.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: The number is malformed, or will not fit on the device.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ==========================================================================
+  /otp-requests:
+    post:
+      tags: [OTP]
+      operationId: requestOtp
+      summary: Issue a one-time password for a phone number
+      description: |
+        **The response never contains the code.** The backend delivers it over
+        SMS and e-mail and the device submits what the user typed to
+        `POST /otp-verifications`.
+
+        `valid: false` means the number is not known to this device's tenant;
+        the panel shows "Phone number not found" and lets the user retry. A
+        suspended member gives exactly the same answer as an unknown number —
+        a door is not a place to enumerate people.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                device_id: { $ref: '#/components/schemas/DeviceIdClaim' }
+                phone: { type: string, examples: ['+94771234567'] }
+      responses:
+        '200':
+          description: The outcome of the lookup.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    title: Issued
+                    required: [valid, otp_request_id, expires_in]
+                    properties:
+                      valid: { type: boolean, const: true }
+                      otp_request_id: { type: string, format: uuid }
+                      expires_in:
+                        type: integer
+                        description: Seconds until the code expires.
+                        examples: [90]
+                      otp:
+                        type: string
+                        pattern: '^\d{6}$'
+                        description: |
+                          **Legacy compatibility only**, present when
+                          `access.otp.return_code_to_device` is enabled. This
+                          hands the plaintext code to anyone holding the device
+                          credential and is off by default.
+                  - type: object
+                    title: Not found
+                    required: [valid]
+                    properties:
+                      valid: { type: boolean, const: false }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /otp-verifications:
+    post:
+      tags: [OTP]
+      operationId: verifyOtp
+      summary: Verify the code the user typed
+      description: |
+        Always 200 — a wrong code is an answer, not a transport failure, and
+        the panel branches on `verified`. Every outcome is written to the
+        access log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [otp_request_id, code]
+              properties:
+                device_id: { $ref: '#/components/schemas/DeviceIdClaim' }
+                otp_request_id: { type: string, format: uuid }
+                code:
+                  type: string
+                  pattern: '^\d{6}$'
+                  examples: ['482915']
+      responses:
+        '200':
+          description: The verification decision.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    title: Verified
+                    properties:
+                      verified: { type: boolean, const: true }
+                      member_id: { type: string, format: uuid }
+                      event_id: { type: string, format: uuid }
+                  - type: object
+                    title: Refused
+                    properties:
+                      verified: { type: boolean, const: false }
+                      reason:
+                        type: string
+                        enum: [otp_mismatch, otp_expired, member_suspended, outside_schedule]
+                      attempts_left: { type: integer, examples: [2] }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /otp-deliveries:
+    post:
+      tags: [OTP]
+      operationId: requestOtpDelivery
+      summary: Legacy fan-out hook (accepted and discarded)
+      deprecated: true
+      description: |
+        Under the original contract the device held the plaintext code and
+        asked the backend to e-mail it. The backend now issues, delivers and
+        verifies the code itself, so there is nothing left for this call to do.
+
+        It is kept, and kept fire-and-forget, because shipped firmware calls it
+        and ignores the response — a 404 would be logged as a backend failure.
+        It never re-sends a code supplied by the caller.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                device_id: { $ref: '#/components/schemas/DeviceIdClaim' }
+                phone: { type: string }
+                otp: { type: string }
+      responses:
+        '202':
+          description: Accepted and discarded.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queued: { type: array, items: { type: string } }
+                  note: { type: string }
+
+  # ==========================================================================
+  /backup-codes:
+    get:
+      tags: [Backup codes]
+      operationId: fetchBackupCodes
+      summary: Fetch a set of five codes to cache
+      description: |
+        **Exactly five codes, exactly six numeric digits each.** The firmware
+        validates both and rejects the whole set otherwise, disabling backup
+        access until it can refetch.
+
+        Because only hashes are stored server-side, a set cannot be handed out
+        twice — there is no plaintext left to hand out. Every fetch therefore
+        mints a fresh set and retires the previous one, which also means a
+        panel reboot rotates the codes.
+
+        If this response is lost in transit, the panel keeps caching codes the
+        backend has already superseded. Those come back as `code_expired`
+        rather than `code_invalid`, which tells an operator to make the device
+        refetch instead of hunting an intruder.
+      responses:
+        '200':
+          description: A fresh set.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [set_id, codes, issued_at]
+                properties:
+                  set_id: { type: string, format: uuid }
+                  codes:
+                    type: array
+                    minItems: 5
+                    maxItems: 5
+                    items: { type: string, pattern: '^\d{6}$' }
+                    examples:
+                      - ['482915', '730264', '915738', '204681', '657390']
+                  issued_at: { type: string, format: date-time }
+        '409':
+          description: |
+            This tenant is in the online-only posture: the panel caches nothing
+            and must verify through `POST /backup-code-verifications`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /backup-codes/attempts:
+    post:
+      tags: [Backup codes]
+      operationId: recordBackupCodeAttempt
+      summary: Log one entry attempt
+      description: |
+        Rate-limited per device. Repeated failures against a static six-digit
+        secret are the clearest brute-force signal the system has; crossing the
+        threshold raises an alert and emits a realtime event.
+
+        The panel reports what it decided locally in `accepted`; the backend
+        records that and reaches its own conclusion. A disagreement means the
+        panel is running on a stale cache and is surfaced rather than quietly
+        reconciled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                device_id: { $ref: '#/components/schemas/DeviceIdClaim' }
+                code: { type: string, pattern: '^\d{6}$' }
+                accepted:
+                  type: boolean
+                  description: What the panel decided locally.
+      responses:
+        '200':
+          description: Logged.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logged: { type: boolean, const: true }
+                  accepted: { type: boolean }
+                  reason:
+                    type: string
+                    enum: [code_accepted, code_invalid, code_expired]
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /backup-code-verifications:
+    post:
+      tags: [Backup codes]
+      operationId: verifyBackupCode
+      summary: Server-side backup-code verification (online-only posture)
+      description: |
+        For deployments that accept losing offline operation in exchange for
+        not caching plaintext codes on the panel. Backup access stops working
+        when the network is down — which, for a *backup* method, may be exactly
+        the wrong trade, so it is a per-tenant setting and off by default.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                device_id: { $ref: '#/components/schemas/DeviceIdClaim' }
+                code: { type: string, pattern: '^\d{6}$' }
+      responses:
+        '200':
+          description: The verification decision.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  verified: { type: boolean }
+                  reason: { type: string }
+
+  # ==========================================================================
+  /device-commands:
+    get:
+      tags: [Commands]
+      operationId: collectDeviceCommands
+      summary: Collect queued commands
+      description: |
+        The panel cannot receive pushes, so it polls. Commands also ride along
+        on the health response; this endpoint exists for firmware that would
+        rather fetch them separately.
+
+        Collecting a command marks it `sent`, not `acked` — until the device
+        confirms, the backend does not claim the template was actually erased.
+      responses:
+        '200':
+          description: Outstanding commands.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  commands:
+                    type: array
+                    items: { $ref: '#/components/schemas/Command' }
+
+  /device-commands/{commandId}/acknowledgements:
+    post:
+      tags: [Commands]
+      operationId: acknowledgeDeviceCommand
+      summary: Confirm a command was carried out
+      parameters:
+        - name: commandId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [acked, failed] }
+                result:
+                  type: object
+                  description: |
+                    Free-form. A `report_inventory` acknowledgement carries
+                    `occupied_slots`, which the backend reconciles against its
+                    own records.
+                  additionalProperties: true
+                  examples:
+                    - { deleted: true }
+                    - { occupied_slots: [0, 1, 4, 7] }
+      responses:
+        '200':
+          description: Acknowledged.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  acknowledged: { type: boolean, const: true }
+        '404':
+          description: No such command for this device.
+
+  # ==========================================================================
+  /device-registrations:
+    post:
+      tags: [Health]
+      operationId: registerDevice
+      summary: Report identity, firmware version and capacity on first contact
+      description: |
+        Lets the dashboard adopt a panel rather than requiring an installer to
+        type credentials into a device blind.
+
+        This still requires a valid credential: registration tells the backend
+        *about* a device it already trusts, it does not create trust.
+        Self-service enrolment of unknown hardware is not something an access
+        control system should offer.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                firmware_version: { type: string, examples: ['1.4.2'] }
+                template_capacity: { type: integer, examples: [200] }
+                enrolled_count: { type: integer, examples: [12] }
+                metadata: { type: object, additionalProperties: true }
+      responses:
+        '201':
+          description: Registered.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  device: { $ref: '#/components/schemas/DeviceIdentity' }
+                  server_time: { type: string, format: date-time }
+                  settings:
+                    type: object
+                    properties:
+                      otp_ttl_seconds: { type: integer }
+                      backup_codes_online_only: { type: boolean }
+
+# ============================================================================
+components:
+  securitySchemes:
+    DeviceId:
+      type: apiKey
+      in: header
+      name: X-Device-Id
+      description: |
+        The identifier the firmware generates on first boot (`SMA_4821`).
+        **Device-asserted**, so the backend treats it as a claim: it is checked
+        against the device the credential belongs to and never trusted alone.
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    ApiSecret:
+      type: apiKey
+      in: header
+      name: X-API-Secret
+      description: |
+        Compared in constant time against a stored digest. Two live credentials
+        per device are permitted so a rotation overlaps instead of leaving a
+        gap where the panel cannot reach the backend.
+
+  parameters:
+    FirmwareVersion:
+      name: firmware_version
+      in: query
+      required: false
+      schema: { type: string, maxLength: 32 }
+    UptimeMs:
+      name: uptime_ms
+      in: query
+      required: false
+      schema: { type: integer, minimum: 0 }
+    EnrolledCount:
+      name: enrolled_count
+      in: query
+      required: false
+      schema: { type: integer, minimum: 0 }
+    TemplateCapacity:
+      name: template_capacity
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1 }
+
+  schemas:
+    DeviceIdClaim:
+      type: string
+      maxLength: 64
+      pattern: '^[A-Za-z0-9_-]+$'
+      description: |
+        Optional echo of the device's own id. If present it must match the
+        authenticated device; a mismatch is a 403, because it means either a
+        misconfigured panel or a credential being used to write another
+        device's history.
+      examples: ['SMA_4821']
+
+    DeviceIdentity:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        device_id: { type: string, examples: ['SMA_4821'] }
+        name: { type: string, examples: ['Front Entrance'] }
+        location: { type: [string, 'null'] }
+        status: { type: string, enum: [provisioned, active, suspended, retired] }
+        template_capacity: { type: integer }
+
+    AccessMethod:
+      type: string
+      enum: [fingerprint, otp, backup_code, admin_auth, remote]
+      description: |
+        `admin_auth` is not a way through the door — it is the fingerprint
+        check that gates the panel's own settings portal.
+
+    AccessReason:
+      type: string
+      description: Machine-readable outcome code.
+      enum:
+        # Granted
+        - matched
+        - otp_verified
+        - code_accepted
+        - admin_confirmed
+        - remote_unlock
+        # Denied
+        - no_match
+        - not_enrolled
+        - member_suspended
+        - otp_expired
+        - otp_mismatch
+        - code_invalid
+        - code_expired
+        - not_admin
+        - backend_unreachable
+        - rate_limited
+        - outside_schedule
+        - device_suspended
+        - duplicate
+
+    AccessEventSubmission:
+      type: object
+      required: [method, result, reason]
+      properties:
+        idempotency_key:
+          type: [string, 'null']
+          maxLength: 128
+          description: |
+            Device-generated and unique **per device**. Replays are
+            deduplicated on it — an offline panel will resend. Two panels
+            numbering their own queues from zero do not collide.
+          examples: ['SMA_4821-000000123']
+        method: { $ref: '#/components/schemas/AccessMethod' }
+        result: { type: string, enum: [granted, denied] }
+        reason: { $ref: '#/components/schemas/AccessReason' }
+        fingerprint_slot:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 65535
+          description: Device-local sensor slot.
+        confidence:
+          type: [integer, 'null']
+          description: AS608 match confidence.
+          examples: [142]
+        uptime_ms:
+          type: [integer, 'null']
+          minimum: 0
+          description: |
+            Milliseconds since the device booted. Orders events **within one
+            batch** and nothing more — the device has no trustworthy clock.
+        member_uuid:
+          type: [string, 'null']
+          format: uuid
+          description: |
+            Rarely needed. The backend normally resolves the member from the
+            fingerprint slot itself.
+        metadata:
+          type: [object, 'null']
+          maxProperties: 20
+          additionalProperties: true
+
+    Command:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        type:
+          type: string
+          enum:
+            - delete_enrollment
+            - refresh_backup_codes
+            - unlock
+            - reboot
+            - update_settings
+            - report_inventory
+        payload:
+          type: object
+          additionalProperties: true
+          examples:
+            - { fingerprint_slot: 7 }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: The contract. Branch on this, not on the message.
+              examples: ['otp_expired']
+            message:
+              type: string
+              description: For whoever reads the logs afterwards.
+            fields:
+              type: object
+              description: Field-level detail on a validation failure.
+              additionalProperties:
+                type: array
+                items: { type: string }
+            retry_after:
+              type: integer
+              description: Seconds, on a rate-limit response.
+
+  responses:
+    Unauthorized:
+      description: |
+        Bad credentials. Deliberately identical for every failure mode — which
+        of the three header values was wrong is not something a caller gets to
+        learn by probing.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: unauthorized
+              message: Invalid device credentials.
+
+    Forbidden:
+      description: |
+        The credential is valid but the request is not permitted — a suspended
+        device, a suspended tenant, or a body naming a different device.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: device_suspended
+              message: This device is not permitted to use the API.
+
+    ValidationFailed:
+      description: The payload did not satisfy the contract.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+    RateLimited:
+      description: |
+        Per-device limit exceeded. Keyed on the authenticated device rather
+        than the IP: a whole site's panels commonly share one public address,
+        and one compromised device must not throttle its neighbours.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }

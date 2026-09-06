@@ -1,0 +1,760 @@
+openapi: 3.1.0
+
+info:
+  title: Smart Access Control — Dashboard API
+  version: 1.0.0
+  summary: The API behind the React operator dashboard.
+  description: |
+    Cookie-based Sanctum session auth for a first-party SPA served from the
+    same origin. There is no bearer token: an XSS on the dashboard cannot walk
+    away with a credential that opens doors.
+
+    ### Before any mutating request
+
+    `GET /sanctum/csrf-cookie` (outside this prefix) issues the `XSRF-TOKEN`
+    cookie, which must be echoed back in the `X-XSRF-TOKEN` header.
+
+    ### Authorisation
+
+    Every route is tenant-scoped and policy-guarded. Permissions are checked
+    individually by name — a role is only a bundle of them, and no code
+    branches on a role string.
+
+    Two-factor authentication is **required** for any role that can manage
+    devices or members (`super_admin`, `tenant_admin`, `device_manager`).
+    Until such a user enrols, every route except `/me`, `/logout` and the
+    two-factor endpoints returns `403 two_factor_setup_required`.
+
+    ### Pagination
+
+    Most collections are offset-paginated. `/access-events` is **cursor**-
+    paginated: it is the one unbounded table, and `LIMIT 25 OFFSET 200000`
+    makes the database walk all 200,000 rows.
+
+servers:
+  - url: https://example.com/api/admin/v1
+    description: Production
+  - url: http://localhost:8000/api/admin/v1
+    description: Local development
+
+security:
+  - SessionCookie: []
+    XsrfToken: []
+
+tags:
+  - name: Authentication
+  - name: Dashboard
+  - name: Devices
+  - name: Members
+  - name: Access log
+  - name: Administration
+
+paths:
+  # ==========================================================================
+  /login:
+    post:
+      tags: [Authentication]
+      operationId: login
+      summary: Sign in
+      security: [{ XsrfToken: [] }]
+      description: |
+        Two-legged for anyone carrying a second factor. A correct password
+        alone does **not** authenticate the session — the server holds a
+        pending id and waits for `POST /two-factor-challenge`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+                remember: { type: boolean }
+      responses:
+        '200':
+          description: Signed in, or a challenge is required.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  two_factor_required: { type: boolean }
+                  user: { $ref: '#/components/schemas/User' }
+        '422':
+          description: Bad credentials, a suspended account, or too many attempts.
+
+  /two-factor-challenge:
+    post:
+      tags: [Authentication]
+      operationId: twoFactorChallenge
+      summary: Complete sign-in with a TOTP or recovery code
+      security: [{ XsrfToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, maxLength: 16 }
+      responses:
+        '200':
+          description: Signed in.
+        '422':
+          description: The code is not valid, or the sign-in expired.
+
+  /me:
+    get:
+      tags: [Authentication]
+      operationId: currentUser
+      summary: The signed-in operator, their permissions, and any tenant switch
+      responses:
+        '200':
+          description: The current session.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: '#/components/schemas/User' }
+                  permissions: { type: array, items: { type: string } }
+                  impersonated_tenant_id:
+                    type: [string, 'null']
+                    format: uuid
+                    description: SuperAdmin only — the tenant they switched into.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /logout:
+    post:
+      tags: [Authentication]
+      operationId: logout
+      summary: Sign out and invalidate the session
+      responses:
+        '200': { description: Signed out. }
+
+  /two-factor/enroll:
+    post:
+      tags: [Authentication]
+      operationId: enrollTwoFactor
+      summary: Begin TOTP enrolment
+      responses:
+        '200':
+          description: An unconfirmed secret, its otpauth URL and an inline SVG QR.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { type: string }
+                  otpauth_url: { type: string }
+                  qr_svg:
+                    type: string
+                    description: |
+                      Rendered as SVG, so the container needs no image
+                      extension and the code stays sharp at any zoom.
+
+  /two-factor/confirm:
+    post:
+      tags: [Authentication]
+      operationId: confirmTwoFactor
+      summary: Confirm enrolment and receive recovery codes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        '200':
+          description: |
+            Enrolled. The recovery codes are shown once; no endpoint returns
+            them again.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  recovery_codes: { type: array, items: { type: string } }
+
+  # ==========================================================================
+  /dashboard/summary:
+    get:
+      tags: [Dashboard]
+      operationId: dashboardSummary
+      summary: Counts, trends and anything waiting on a person
+      description: |
+        Every query behind this is bounded by a date range. Opening the
+        dashboard must not trigger a scan of the entire event history.
+      parameters:
+        - name: days
+          in: query
+          schema: { type: integer, minimum: 7, maximum: 90, default: 14 }
+      responses:
+        '200':
+          description: The landing-page payload.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardSummary' }
+
+  # ==========================================================================
+  /devices:
+    get:
+      tags: [Devices]
+      operationId: listDevices
+      summary: List devices
+      parameters:
+        - { name: search, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: online_only, in: query, schema: { type: boolean } }
+        - { $ref: '#/components/parameters/PerPage' }
+      responses:
+        '200':
+          description: A page of devices.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Device' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+    post:
+      tags: [Devices]
+      operationId: createDevice
+      summary: Adopt a device
+      description: Requires `device.create`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_id, name]
+              properties:
+                device_id: { type: string, pattern: '^[A-Za-z0-9_-]+$' }
+                name: { type: string }
+                location: { type: [string, 'null'] }
+                template_capacity: { type: integer }
+      responses:
+        '201': { description: Adopted. }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /devices/{device}:
+    parameters:
+      - { $ref: '#/components/parameters/DeviceUuid' }
+    get:
+      tags: [Devices]
+      operationId: showDevice
+      summary: One device, with credentials, active code set and pending commands
+      responses:
+        '200':
+          description: The device.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Device' }
+        '404': { description: Not found, or not in your tenant. }
+    patch:
+      tags: [Devices]
+      operationId: updateDevice
+      summary: Update a device
+      responses:
+        '200': { description: Updated. }
+    delete:
+      tags: [Devices]
+      operationId: deleteDevice
+      summary: Retire a device
+      description: |
+        Soft-deleted, never purged: the access events referencing this door
+        have to keep resolving.
+      responses:
+        '200': { description: Retired. }
+
+  /devices/{device}/unlock:
+    parameters:
+      - { $ref: '#/components/parameters/DeviceUuid' }
+    post:
+      tags: [Devices]
+      operationId: unlockDevice
+      summary: Unlock remotely
+      description: |
+        Requires `device.unlock`. Queued as a device command and recorded as an
+        access event with `method: remote` and the acting operator, so an
+        out-of-hours door opening is attributable to a person.
+
+        The door does not open until the panel collects the command on its next
+        poll — up to one health interval away.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 120 }
+      responses:
+        '202':
+          description: Queued.
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /devices/{device}/backup-codes/rotations:
+    parameters:
+      - { $ref: '#/components/parameters/DeviceUuid' }
+    post:
+      tags: [Devices]
+      operationId: rotateBackupCodes
+      summary: Force a new backup code set
+      description: |
+        Requires `backupcode.rotate`. **The plaintext codes are in this
+        response and in no other** — there is no endpoint that shows them
+        again.
+      responses:
+        '201':
+          description: A new set.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  set: { $ref: '#/components/schemas/BackupCodeSet' }
+                  codes:
+                    type: array
+                    minItems: 5
+                    maxItems: 5
+                    items: { type: string, pattern: '^\d{6}$' }
+                  warning: { type: string }
+
+  /devices/{device}/credentials:
+    parameters:
+      - { $ref: '#/components/parameters/DeviceUuid' }
+    get:
+      tags: [Devices]
+      operationId: listDeviceCredentials
+      summary: List a device's API credentials (never the secrets)
+      responses:
+        '200': { description: The credentials. }
+    post:
+      tags: [Devices]
+      operationId: issueDeviceCredential
+      summary: Issue a credential
+      description: |
+        The secret is in this response and nowhere else. At most two live
+        credentials per device, so a rotation overlaps rather than locking the
+        panel out.
+      responses:
+        '201':
+          description: The three values to type into the panel's settings portal.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  device_id: { type: string }
+                  api_key: { type: string }
+                  api_secret: { type: string }
+                  warning: { type: string }
+        '422':
+          description: Two live credentials already exist.
+
+  /devices/{device}/health:
+    parameters:
+      - { $ref: '#/components/parameters/DeviceUuid' }
+    get:
+      tags: [Devices]
+      operationId: deviceHealthHistory
+      summary: Health-poll history
+      description: |
+        Run-length encoded: consecutive polls in the same state extend one row,
+        so a device does not write ~2,880 identical rows a day.
+      responses:
+        '200': { description: The history. }
+
+  # ==========================================================================
+  /members:
+    get:
+      tags: [Members]
+      operationId: listMembers
+      summary: List members
+      parameters:
+        - { name: search, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: admins_only, in: query, schema: { type: boolean } }
+        - { $ref: '#/components/parameters/PerPage' }
+      responses:
+        '200': { description: A page of members. }
+    post:
+      tags: [Members]
+      operationId: createMember
+      summary: Create a member
+      description: |
+        `phone` is normalised to E.164 and refused if the result will not fit
+        in the panel's 14-character field.
+      responses:
+        '201': { description: Created. }
+
+  /members/{member}:
+    parameters:
+      - name: member
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Members]
+      operationId: showMember
+      summary: One member, with enrolments and schedules
+      responses:
+        '200': { description: The member. }
+    patch:
+      tags: [Members]
+      operationId: updateMember
+      summary: Update a member
+      responses:
+        '200': { description: Updated. }
+    delete:
+      tags: [Members]
+      operationId: deleteMember
+      summary: Delete a member
+      description: Soft-deleted — their access history must keep naming them.
+      responses:
+        '200': { description: Deleted. }
+
+  /enrollments:
+    get:
+      tags: [Members]
+      operationId: listEnrollments
+      summary: List enrolments
+      parameters:
+        - { name: device_id, in: query, schema: { type: string, format: uuid } }
+        - { name: member_id, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { type: string } }
+      responses:
+        '200': { description: A page of enrolments. }
+
+  /enrollments/{enrollment}:
+    delete:
+      tags: [Members]
+      operationId: revokeEnrollment
+      summary: Revoke an enrolment and queue the template erase
+      description: |
+        Requires `enrollment.revoke`. Queues a `delete_enrollment` command so
+        the template is erased from the sensor. Without that second half the
+        member is withdrawn on paper and their finger still opens the door —
+        which is why the dashboard shows the pending command afterwards.
+      parameters:
+        - name: enrollment
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Revoked; the erase is queued. }
+
+  # ==========================================================================
+  /access-events:
+    get:
+      tags: [Access log]
+      operationId: listAccessEvents
+      summary: The access log, filtered and cursor-paginated
+      parameters:
+        - { name: device_id, in: query, schema: { type: string, format: uuid } }
+        - { name: member_id, in: query, schema: { type: string, format: uuid } }
+        - { name: method, in: query, schema: { type: string } }
+        - { name: result, in: query, schema: { type: string, enum: [granted, denied] } }
+        - { name: reason, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { $ref: '#/components/parameters/PerPage' }
+      responses:
+        '200':
+          description: A page of events.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AccessEvent' } }
+                  meta:
+                    type: object
+                    properties:
+                      next_cursor: { type: [string, 'null'] }
+                      prev_cursor: { type: [string, 'null'] }
+
+  /access-events/export:
+    get:
+      tags: [Access log]
+      operationId: exportAccessEvents
+      summary: Stream the filtered log as CSV or XLSX
+      description: |
+        Requires `event.export`. Streamed row by row — an export may be large,
+        but it must not hold a year of door history in memory while it renders.
+      parameters:
+        - name: format
+          in: query
+          schema: { type: string, enum: [csv, xlsx], default: csv }
+      responses:
+        '200':
+          description: The file.
+          content:
+            text/csv: { schema: { type: string } }
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema: { type: string, format: binary }
+
+  /audit-logs:
+    get:
+      tags: [Administration]
+      operationId: listAuditLogs
+      summary: Dashboard mutations, with before/after state
+      description: |
+        Requires `audit.view`. Read-only: no endpoint edits or deletes an
+        entry. Distinct from the access log — one records what an operator
+        changed, the other what happened at a door.
+      responses:
+        '200': { description: A page of entries. }
+
+  /users:
+    get:
+      tags: [Administration]
+      operationId: listUsers
+      summary: List dashboard operators
+      responses:
+        '200': { description: A page of users. }
+    post:
+      tags: [Administration]
+      operationId: inviteUser
+      summary: Invite an operator
+      description: |
+        Requires `user.invite`. No password is set here — the invitation
+        carries a reset link, so a password never travels through this API or
+        sits in an inbox.
+      responses:
+        '201': { description: Invited. }
+
+  /roles:
+    get:
+      tags: [Administration]
+      operationId: listRoles
+      summary: Assignable roles and the permissions each carries
+      responses:
+        '200': { description: The permission matrix. }
+
+  /tenants/{tenant}/switch:
+    post:
+      tags: [Administration]
+      operationId: switchTenant
+      summary: Bind a SuperAdmin to one tenant
+      description: |
+        The one mechanism that deliberately crosses the isolation boundary, so
+        it is written to the audit log every time.
+      parameters:
+        - name: tenant
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Switched. }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /webhooks:
+    get:
+      tags: [Administration]
+      operationId: listWebhooks
+      summary: List webhook endpoints
+      responses:
+        '200': { description: The endpoints. }
+    post:
+      tags: [Administration]
+      operationId: createWebhook
+      summary: Subscribe a URL to events
+      description: |
+        Requires `webhook.manage`. HTTPS only — these payloads name people and
+        doors. The signing secret is returned once; deliveries carry an
+        `X-Signature: sha256=…` HMAC over the body.
+      responses:
+        '201':
+          description: Created, with the signing secret.
+
+# ============================================================================
+components:
+  securitySchemes:
+    SessionCookie:
+      type: apiKey
+      in: cookie
+      name: laravel_session
+    XsrfToken:
+      type: apiKey
+      in: header
+      name: X-XSRF-TOKEN
+      description: Echo of the cookie issued by `GET /sanctum/csrf-cookie`.
+
+  parameters:
+    PerPage:
+      name: per_page
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 25 }
+    DeviceUuid:
+      name: device
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  schemas:
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        status: { type: string }
+        roles: { type: array, items: { type: string } }
+        is_super_admin: { type: boolean }
+        two_factor_enabled: { type: boolean }
+        two_factor_required: { type: boolean }
+
+    Device:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        device_id: { type: string }
+        name: { type: string }
+        location: { type: [string, 'null'] }
+        status:
+          type: string
+          enum: [provisioned, active, suspended, retired]
+          description: The administrative state an operator set.
+        is_online:
+          type: boolean
+          description: |
+            Whether the panel is answering right now. Independent of `status` —
+            a suspended device can be online, and an active one can be dark.
+        firmware_version: { type: [string, 'null'] }
+        last_health_at: { type: [string, 'null'], format: date-time }
+        template_capacity: { type: integer }
+        enrolled_count: { type: integer }
+
+    AccessEvent:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        method: { type: string }
+        method_label: { type: string }
+        result: { type: string, enum: [granted, denied] }
+        reason: { type: string }
+        reason_label:
+          type: string
+          description: |
+            Sent alongside the code so the dashboard never keeps its own copy
+            of this vocabulary.
+        occurred_at:
+          type: string
+          format: date-time
+          description: Server-assigned on receipt.
+        device_reported_at:
+          type: [string, 'null']
+          format: date-time
+          description: Uptime-derived; for ordering only.
+        fingerprint_slot: { type: [integer, 'null'] }
+        confidence: { type: [integer, 'null'] }
+
+    BackupCodeSet:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [active, superseded] }
+        reason: { type: string }
+        issued_at: { type: string, format: date-time }
+        codes:
+          type: array
+          description: Metadata only — `last4` for display, never the code.
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              last4: { type: string }
+              used_at: { type: [string, 'null'], format: date-time }
+
+    DashboardSummary:
+      type: object
+      properties:
+        devices:
+          type: object
+          properties:
+            total: { type: integer }
+            online: { type: integer }
+            offline: { type: integer }
+        members:
+          type: object
+          properties:
+            total: { type: integer }
+            active: { type: integer }
+            admins: { type: integer }
+        today:
+          type: object
+          properties:
+            total: { type: integer }
+            granted: { type: integer }
+            denied: { type: integer }
+            denied_rate: { type: number }
+        trend:
+          type: array
+          items:
+            type: object
+            properties:
+              date: { type: string, format: date }
+              granted: { type: integer }
+              denied: { type: integer }
+        top_denial_reasons:
+          type: array
+          items:
+            type: object
+            properties:
+              reason: { type: string }
+              label: { type: string }
+              count: { type: integer }
+        attention:
+          type: object
+          description: The things that need a person.
+          properties:
+            devices_offline: { type: integer }
+            orphaned_enrollments: { type: integer }
+            pending_commands: { type: integer }
+
+    PageMeta:
+      type: object
+      properties:
+        current_page: { type: integer }
+        last_page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            fields:
+              type: object
+              additionalProperties: { type: array, items: { type: string } }
+
+  responses:
+    Unauthenticated:
+      description: No session, or it expired.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+    Forbidden:
+      description: |
+        Signed in, but the policy refused — a missing permission, another
+        tenant's row, or an outstanding two-factor enrolment.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }

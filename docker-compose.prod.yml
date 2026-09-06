@@ -1,0 +1,118 @@
+# Smart Access Control — shared-hosting stack.
+#
+# Assumes the host provides:
+#   * Apache, configured to reverse-proxy into this stack (docker/apache/)
+#   * MySQL, reachable from the container (see DB_HOST below)
+#
+# Everything else — PHP, its extensions, the queue worker, the scheduler and
+# the Reverb websocket server — lives inside the containers.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# The published ports bind to 127.0.0.1 only: the host's Apache is the sole
+# public entrance, so nothing here is directly reachable from the internet.
+#
+name: smart-access-control
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+    target: prod
+  image: smart-access-control/app:${APP_VERSION:-latest}
+  env_file: .env
+  environment: &app-env
+    APP_ENV: production
+    CONTAINER_ROLE: app
+  volumes:
+    # Only mutable state is mounted; the code itself is baked into the image.
+    - app-storage:/var/www/html/storage
+  extra_hosts:
+    # Lets DB_HOST=host.docker.internal reach a MySQL server running on the
+    # host itself, which is the usual shared-hosting arrangement.
+    - "host.docker.internal:host-gateway"
+  depends_on:
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  app:
+    <<: *app
+    environment:
+      <<: *app-env
+      CONTAINER_ROLE: app
+      RUN_MIGRATIONS: "${RUN_MIGRATIONS:-true}"
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:80"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1/up"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  queue:
+    <<: *app
+    environment:
+      <<: *app-env
+      CONTAINER_ROLE: queue
+      SKIP_OPTIMIZE: "true"
+    depends_on:
+      app:
+        condition: service_healthy
+
+  scheduler:
+    <<: *app
+    environment:
+      <<: *app-env
+      CONTAINER_ROLE: scheduler
+      SKIP_OPTIMIZE: "true"
+    depends_on:
+      app:
+        condition: service_healthy
+
+  reverb:
+    <<: *app
+    environment:
+      <<: *app-env
+      CONTAINER_ROLE: reverb
+      SKIP_OPTIMIZE: "true"
+    ports:
+      # REVERB_HOST_PORT is the loopback binding Apache proxies to; REVERB_PORT
+      # is what the browser connects to (443, through Apache).
+      - "127.0.0.1:${REVERB_HOST_PORT:-8080}:8080"
+    depends_on:
+      app:
+        condition: service_healthy
+
+  # Redis stays inside the stack: shared hosts rarely provide one, and the
+  # queue and Reverb both need it.
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy noeviction
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  app-storage:
+  redis-data:

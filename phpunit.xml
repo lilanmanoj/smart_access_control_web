@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+>
+    <testsuites>
+        <testsuite name="Unit">
+            <directory>tests/Unit</directory>
+        </testsuite>
+        <testsuite name="Feature">
+            <directory>tests/Feature</directory>
+        </testsuite>
+    </testsuites>
+
+    <source>
+        <include>
+            <directory>app</directory>
+        </include>
+    </source>
+
+    <!--
+        ============================================================
+        These are <server>, not <env>, and it matters.
+        ============================================================
+
+        Laravel's Env repository reads $_SERVER *before* $_ENV. Docker delivers
+        the container's configuration into $_SERVER, and PHPUnit's
+        `<env force="true">` writes $_ENV and putenv() but leaves $_SERVER
+        alone — so an <env> override here is silently ignored and the suite
+        inherits the *development* database.
+
+        That is not a cosmetic problem: RefreshDatabase runs `migrate:fresh`,
+        so the first `artisan test` would drop the developer's own data.
+        `<server force="true">` is what actually wins.
+    -->
+    <php>
+        <server name="APP_ENV" value="testing" force="true"/>
+        <server name="APP_MAINTENANCE_DRIVER" value="file" force="true"/>
+        <server name="BCRYPT_ROUNDS" value="4" force="true"/>
+
+        <!-- Nothing in the suite should reach Redis, a queue or a mailbox. -->
+        <server name="BROADCAST_CONNECTION" value="null" force="true"/>
+        <server name="CACHE_STORE" value="array" force="true"/>
+        <server name="QUEUE_CONNECTION" value="sync" force="true"/>
+        <server name="SESSION_DRIVER" value="array" force="true"/>
+        <server name="MAIL_MAILER" value="array" force="true"/>
+
+        <!--
+            MySQL, not SQLite.
+
+            The schema leans on engine-specific behaviour SQLite does not share:
+            the enrolments unique index relies on MySQL treating NULLs as
+            distinct, and the circular access_events/backup_codes foreign key is
+            added to an existing table, which SQLite cannot do at all. A suite
+            passing on a different engine than production proves the wrong
+            thing.
+
+            The database is created by docker/mysql/init/01-testing-database.sql.
+        -->
+        <server name="DB_CONNECTION" value="mysql" force="true"/>
+        <server name="DB_DATABASE" value="smart_access_testing" force="true"/>
+        <server name="DB_URL" value="" force="true"/>
+
+        <!-- Deterministic domain behaviour, independent of the local .env. -->
+        <server name="OTP_TTL_SECONDS" value="90" force="true"/>
+        <server name="OTP_MAX_ATTEMPTS" value="3" force="true"/>
+        <server name="OTP_RETURN_CODE_TO_DEVICE" value="false" force="true"/>
+        <server name="OTP_REQUIRE_ENROLLMENT" value="false" force="true"/>
+        <server name="BACKUP_CODES_ONLINE_ONLY" value="false" force="true"/>
+        <server name="EVENT_DUPLICATE_WINDOW" value="10" force="true"/>
+        <server name="EVENT_RETENTION_DAYS" value="365" force="true"/>
+        <server name="PHONE_DEFAULT_COUNTRY_CODE" value="+94" force="true"/>
+        <server name="SMS_DRIVER" value="null" force="true"/>
+        <server name="ACCESS_SCHEDULES_ENFORCE" value="true" force="true"/>
+        <server name="DEVICE_REQUIRE_SIGNATURE" value="false" force="true"/>
+    </php>
+</phpunit>
