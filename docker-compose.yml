@@ -119,6 +119,10 @@ services:
     environment:
       # A writable npm home; the default is the root user's.
       npm_config_cache: /tmp/npm
+      VITE_PORT: ${VITE_PORT:-5173}
+      # The address the browser uses to reach this dev server. Set it to your
+      # LAN IP when serving other machines; see the note in .env.example.
+      VITE_DEV_HOST: ${VITE_DEV_HOST:-localhost}
     volumes:
       - .:/var/www/html
     ports:

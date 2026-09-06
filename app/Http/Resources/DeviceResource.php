@@ -29,6 +29,12 @@ class DeviceResource extends JsonResource
             'template_capacity' => $this->template_capacity,
             'enrolled_count' => $this->enrolled_count,
             'metadata' => $this->metadata,
+            // Only present for a cross-tenant view; an operator inside a single
+            // tenant already knows whose devices these are.
+            'tenant' => $this->whenLoaded('tenant', fn (): array => [
+                'id' => $this->tenant->uuid,
+                'name' => $this->tenant->name,
+            ]),
             'active_backup_code_set' => new BackupCodeSetResource($this->whenLoaded('activeBackupCodeSet')),
             'pending_commands' => DeviceCommandResource::collection($this->whenLoaded('commands')),
             'credentials' => DeviceCredentialResource::collection($this->whenLoaded('credentials')),

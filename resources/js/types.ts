@@ -64,6 +64,8 @@ export interface Device {
     template_capacity: number;
     enrolled_count: number;
     metadata: Record<string, unknown> | null;
+    /** Only sent on cross-tenant views; an operator inside one tenant knows. */
+    tenant?: { id: string; name: string };
     active_backup_code_set?: BackupCodeSet | null;
     pending_commands?: DeviceCommand[];
     credentials?: DeviceCredential[];

@@ -96,6 +96,27 @@ abstract class TestCase extends BaseTestCase
         return $user;
     }
 
+    /**
+     * Sign in a SuperAdmin, in the cross-tenant fleet view.
+     *
+     * Sanctum only starts a session for a stateful origin, and the tenant
+     * middleware reads a SuperAdmin's selected tenant from that session.
+     */
+    protected function actingAsSuperAdmin(): User
+    {
+        $user = User::factory()->create(['tenant_id' => null]);
+        $user->assignRole('super_admin');
+        $user->forceFill([
+            'two_factor_secret' => 'ABCDEFGHIJKLMNOP',
+            'two_factor_confirmed_at' => now(),
+        ])->save();
+
+        config(['sanctum.stateful' => ['localhost']]);
+        $this->actingAs($user)->withHeader('Referer', 'http://localhost');
+
+        return $user;
+    }
+
     /** Convenience for the admin API's URL prefix. */
     protected function adminGet(string $path, array $query = []): TestResponse
     {

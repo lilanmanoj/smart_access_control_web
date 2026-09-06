@@ -1,7 +1,7 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import type { Paginated, Tenant } from '@/types';
+import { useTenantOptions } from '@/lib/tenants';
 import { Select } from './ui';
 
 /**
@@ -16,17 +16,7 @@ export function TenantSwitcher() {
     const { user, impersonatedTenantId, refresh } = useAuth();
     const queryClient = useQueryClient();
 
-    const { data } = useQuery({
-        queryKey: ['tenants'],
-        queryFn: async () => {
-            const { data } = await api.get<Paginated<Tenant>>('/tenants', {
-                params: { per_page: 50 },
-            });
-
-            return data;
-        },
-        enabled: user?.is_super_admin === true,
-    });
+    const { data: tenants } = useTenantOptions();
 
     const switchTenant = useMutation({
         mutationFn: async (tenantId: string) => {
@@ -49,7 +39,7 @@ export function TenantSwitcher() {
         return null;
     }
 
-    const current = data?.data.find((tenant) => tenant.id === impersonatedTenantId);
+    const current = tenants?.find((tenant) => tenant.id === impersonatedTenantId);
 
     return (
         <div className="flex flex-col gap-1">
@@ -63,7 +53,7 @@ export function TenantSwitcher() {
                 onChange={(event) => switchTenant.mutate(event.target.value)}
             >
                 <option value="">All tenants (fleet view)</option>
-                {data?.data.map((tenant) => (
+                {tenants?.map((tenant) => (
                     <option key={tenant.id} value={tenant.id}>
                         {tenant.name}
                     </option>

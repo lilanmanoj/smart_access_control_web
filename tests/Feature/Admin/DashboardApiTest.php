@@ -220,6 +220,169 @@ class DashboardApiTest extends TestCase
         $this->adminGet('/devices')->assertOk();
     }
 
+    /**
+     * The failure a SuperAdmin hits when they add a device without first
+     * choosing a tenant. It has to be a clear 409 they can act on, not a 500
+     * carrying a MySQL constraint message.
+     */
+    #[Test]
+    public function a_super_admin_in_fleet_view_gets_an_actionable_error(): void
+    {
+        $this->seed(RolesAndPermissionsSeeder::class);
+        Tenant::factory()->create();
+
+        $this->actingAsSuperAdmin();
+
+        $this->postJson('/api/admin/v1/devices', [
+            'device_id' => 'SMA_DEMO_01',
+            'name' => 'Demo Device 01',
+            'location' => 'Laboratory',
+        ])
+            ->assertStatus(409)
+            ->assertJsonPath('error.code', 'tenant_not_selected');
+
+        $this->assertDatabaseMissing('devices', ['device_id' => 'SMA_DEMO_01']);
+    }
+
+    /**
+     * …and it succeeds once they switch into one, which is what the error
+     * tells them to do.
+     */
+    #[Test]
+    public function a_super_admin_can_create_a_device_after_switching_tenant(): void
+    {
+        $this->seed(RolesAndPermissionsSeeder::class);
+        $tenant = Tenant::factory()->create();
+
+        $this->actingAsSuperAdmin();
+
+        $this->postJson("/api/admin/v1/tenants/{$tenant->uuid}/switch")->assertOk();
+
+        $this->postJson('/api/admin/v1/devices', [
+            'device_id' => 'SMA_DEMO_01',
+            'name' => 'Demo Device 01',
+            'location' => 'Laboratory',
+        ])->assertCreated();
+
+        $this->assertDatabaseHas('devices', [
+            'device_id' => 'SMA_DEMO_01',
+            'tenant_id' => $tenant->id,
+        ]);
+    }
+
+    /**
+     * The SuperAdmin's way through from fleet view: name the tenant on the
+     * request itself.
+     */
+    #[Test]
+    public function a_super_admin_can_choose_the_tenant_when_creating_a_device(): void
+    {
+        $this->seed(RolesAndPermissionsSeeder::class);
+        Tenant::factory()->create();
+        $target = Tenant::factory()->create();
+
+        $this->actingAsSuperAdmin();
+
+        $this->postJson('/api/admin/v1/devices', [
+            'device_id' => 'SMA_DEMO_01',
+            'name' => 'Demo Device 01',
+            'location' => 'Laboratory',
+            'tenant_id' => $target->uuid,
+        ])
+            ->assertCreated()
+            ->assertJsonPath('data.tenant.id', $target->uuid);
+
+        $this->assertDatabaseHas('devices', [
+            'device_id' => 'SMA_DEMO_01',
+            'tenant_id' => $target->id,
+        ]);
+    }
+
+    /**
+     * The gate is the `tenant.manage` permission, not the role name. A
+     * tenant_admin holds every other permission and still cannot reach out of
+     * their own tenant.
+     */
+    #[Test]
+    public function an_operator_without_tenant_manage_cannot_choose_a_tenant(): void
+    {
+        $ownTenant = Tenant::factory()->create();
+        $otherTenant = Tenant::factory()->create();
+
+        $this->actingAsOperator('tenant_admin', $ownTenant);
+
+        $this->postJson('/api/admin/v1/devices', [
+            'device_id' => 'SMA_DEMO_01',
+            'name' => 'Demo Device 01',
+            'tenant_id' => $otherTenant->uuid,
+        ])
+            ->assertForbidden()
+            ->assertJsonPath('error.code', 'tenant_selection_forbidden');
+
+        $this->assertDatabaseMissing('devices', ['device_id' => 'SMA_DEMO_01']);
+    }
+
+    #[Test]
+    public function choosing_an_unknown_tenant_is_refused(): void
+    {
+        $this->seed(RolesAndPermissionsSeeder::class);
+        $this->actingAsSuperAdmin();
+
+        $this->postJson('/api/admin/v1/devices', [
+            'device_id' => 'SMA_DEMO_01',
+            'name' => 'Demo Device 01',
+            'tenant_id' => '01a00000-0000-7000-8000-000000000000',
+        ])
+            ->assertStatus(422)
+            ->assertJsonPath('error.code', 'unknown_tenant');
+    }
+
+    #[Test]
+    public function choosing_a_suspended_tenant_is_refused(): void
+    {
+        $this->seed(RolesAndPermissionsSeeder::class);
+        $suspended = Tenant::factory()->suspended()->create();
+
+        $this->actingAsSuperAdmin();
+
+        $this->postJson('/api/admin/v1/devices', [
+            'device_id' => 'SMA_DEMO_01',
+            'name' => 'Demo Device 01',
+            'tenant_id' => $suspended->uuid,
+        ])
+            ->assertStatus(422)
+            ->assertJsonPath('error.code', 'tenant_suspended');
+    }
+
+    /**
+     * device_id is unique *per tenant*, so the uniqueness rule has to run
+     * against the chosen tenant rather than whatever the request had bound.
+     */
+    #[Test]
+    public function the_same_device_id_may_exist_in_two_tenants(): void
+    {
+        $this->seed(RolesAndPermissionsSeeder::class);
+        $alpha = Tenant::factory()->create();
+        $beta = Tenant::factory()->create();
+
+        Device::factory()->for($alpha)->create(['device_id' => 'SMA_4821']);
+
+        $this->actingAsSuperAdmin();
+
+        $this->postJson('/api/admin/v1/devices', [
+            'device_id' => 'SMA_4821',
+            'name' => 'Another tenant, same panel id',
+            'tenant_id' => $beta->uuid,
+        ])->assertCreated();
+
+        // …but not twice within one tenant.
+        $this->postJson('/api/admin/v1/devices', [
+            'device_id' => 'SMA_4821',
+            'name' => 'Duplicate',
+            'tenant_id' => $beta->uuid,
+        ])->assertStatus(422);
+    }
+
     #[Test]
     public function mutations_are_written_to_the_audit_log(): void
     {

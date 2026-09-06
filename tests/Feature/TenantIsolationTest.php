@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Exceptions\TenantContextRequired;
 use App\Models\AccessEvent;
+use App\Models\AuditLog;
 use App\Models\Device;
 use App\Models\Enrollment;
 use App\Models\Member;
@@ -195,6 +197,88 @@ class TenantIsolationTest extends TestCase
         $this->adminGet('/access-events')
             ->assertOk()
             ->assertJsonCount(0, 'data');
+    }
+
+    /**
+     * A SuperAdmin in the cross-tenant fleet view has no tenant bound, so a
+     * tenant-owned row has nowhere to go. That has to be an answer they can
+     * act on, not `Field 'tenant_id' doesn't have a default value` from MySQL.
+     */
+    #[Test]
+    public function creating_a_tenant_owned_row_with_no_tenant_selected_is_refused_clearly(): void
+    {
+        app(TenantContext::class)->forget();
+
+        try {
+            Device::create([
+                'device_id' => 'SMA_DEMO_01',
+                'name' => 'Demo Device 01',
+                'location' => 'Laboratory',
+            ]);
+
+            $this->fail('Creating a device with no tenant bound should have been refused.');
+        } catch (TenantContextRequired $exception) {
+            $this->assertSame('tenant_not_selected', $exception->errorCode);
+            $this->assertSame(409, $exception->status);
+            $this->assertStringContainsString('device', $exception->getMessage());
+        }
+
+        $this->assertDatabaseMissing('devices', ['device_id' => 'SMA_DEMO_01']);
+    }
+
+    /**
+     * The same write succeeds the moment a tenant is chosen — which is what the
+     * refusal above tells the operator to do.
+     */
+    #[Test]
+    public function the_same_write_succeeds_once_a_tenant_is_selected(): void
+    {
+        $tenant = Tenant::factory()->create();
+
+        app(TenantContext::class)->set($tenant);
+
+        $device = Device::create([
+            'device_id' => 'SMA_DEMO_01',
+            'name' => 'Demo Device 01',
+            'location' => 'Laboratory',
+        ]);
+
+        $this->assertSame($tenant->id, $device->tenant_id);
+    }
+
+    /**
+     * An explicit tenant_id is always honoured — that is how seeders, factories
+     * and queued jobs write on behalf of a tenant they name themselves.
+     */
+    #[Test]
+    public function an_explicit_tenant_id_is_honoured_with_no_context_bound(): void
+    {
+        $tenant = Tenant::factory()->create();
+
+        app(TenantContext::class)->forget();
+
+        $member = Member::create([
+            'tenant_id' => $tenant->id,
+            'full_name' => 'Named explicitly',
+        ]);
+
+        $this->assertSame($tenant->id, $member->tenant_id);
+    }
+
+    /**
+     * The audit log is the deliberate exception: a SuperAdmin's cross-tenant
+     * actions belong to no tenant, and those are the entries the trail most
+     * needs.
+     */
+    #[Test]
+    public function the_audit_log_may_be_written_with_no_tenant(): void
+    {
+        app(TenantContext::class)->forget();
+
+        $log = AuditLog::create(['action' => 'tenant.switch_cleared']);
+
+        $this->assertNull($log->tenant_id);
+        $this->assertDatabaseHas('audit_logs', ['action' => 'tenant.switch_cleared']);
     }
 
     /**

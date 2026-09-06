@@ -18,11 +18,27 @@ return [
     |
     */
 
-    'stateful' => explode(',', env('SANCTUM_STATEFUL_DOMAINS', sprintf(
-        '%s%s',
-        'localhost,localhost:3000,127.0.0.1,127.0.0.1:8000,::1',
+    'stateful' => array_filter(explode(',', sprintf(
+        '%s%s%s',
+        env('SANCTUM_STATEFUL_DOMAINS', 'localhost,localhost:3000,127.0.0.1,127.0.0.1:8000,::1'),
+
+        // Whatever APP_URL points at is always stateful.
         Sanctum::currentApplicationUrlWithPort(),
-        // Sanctum::currentRequestHost(),
+
+        /*
+         * In local development the dashboard gets opened from wherever the
+         * developer happens to be — localhost, a LAN address like
+         * http://10.21.82.125:8000, a tunnel — and the session cookie is only
+         * issued for hosts on this list. Maintaining that list by hand is pure
+         * friction on a dev box, and the failure it causes is silent: assets
+         * load, the login form appears, and the POST comes back 401 with no
+         * clue why.
+         *
+         * Outside local, the list stays explicit — treating an arbitrary Host
+         * header as stateful is not something a production deployment should
+         * do.
+         */
+        env('APP_ENV') === 'local' ? Sanctum::currentRequestHost() : '',
     ))),
 
     /*

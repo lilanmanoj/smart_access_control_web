@@ -10,6 +10,7 @@ use App\Enums\DenialReason;
 use App\Enums\DeviceCommandStatus;
 use App\Enums\DeviceCommandType;
 use App\Enums\DeviceStatus;
+use App\Http\Controllers\Admin\Concerns\ResolvesTargetTenant;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\BackupCodeSetResource;
 use App\Http\Resources\DeviceCommandResource;
@@ -24,10 +25,13 @@ use App\Support\TenantContext;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Arr;
 use Illuminate\Validation\Rule;
 
 class DeviceController extends Controller
 {
+    use ResolvesTargetTenant;
+
     public function __construct(
         private readonly DeviceCommandService $commands,
         private readonly BackupCodeService $backupCodes,
@@ -40,6 +44,9 @@ class DeviceController extends Controller
         $this->authorize('viewAny', Device::class);
 
         $devices = Device::query()
+            // A SuperAdmin in fleet view sees every tenant's doors at once, so
+            // the owning tenant has to travel with each row.
+            ->with('tenant')
             ->when($request->filled('status'), fn ($q) => $q->where('status', $request->string('status')))
             ->when($request->filled('search'), function ($q) use ($request): void {
                 $term = '%'.$request->string('search').'%';
@@ -59,6 +66,7 @@ class DeviceController extends Controller
         $this->authorize('view', $device);
 
         return new DeviceResource($device->load([
+            'tenant',
             'activeBackupCodeSet.codes',
             'credentials',
             // Only what has not landed yet: a resolved command is history, and
@@ -74,29 +82,43 @@ class DeviceController extends Controller
     {
         $this->authorize('create', Device::class);
 
-        $validated = $request->validate([
-            // Device-asserted, generated on the panel's first boot.
-            'device_id' => [
-                'required', 'string', 'max:64', 'regex:/^[A-Za-z0-9_-]+$/',
-                Rule::unique('devices')->where('tenant_id', app(TenantContext::class)->id()),
-            ],
-            'name' => ['required', 'string', 'max:120'],
-            'location' => ['nullable', 'string', 'max:160'],
-            'template_capacity' => ['nullable', 'integer', 'min:1', 'max:1000'],
-        ]);
+        // Resolved before validation, because the device_id uniqueness rule is
+        // scoped per tenant — checking it against the wrong one would either
+        // reject a legitimate id or allow a duplicate.
+        $target = $this->resolveTargetTenant($request);
 
-        $device = Device::create([
-            ...$validated,
-            'status' => DeviceStatus::Provisioned,
-            'template_capacity' => $validated['template_capacity']
-                ?? config('access.devices.default_template_capacity'),
-        ]);
+        return $this->withinTargetTenant($target, function () use ($request): JsonResponse {
+            $validated = $request->validate([
+                // Device-asserted, generated on the panel's first boot.
+                'device_id' => [
+                    'required', 'string', 'max:64', 'regex:/^[A-Za-z0-9_-]+$/',
+                    Rule::unique('devices')->where('tenant_id', app(TenantContext::class)->id()),
+                ],
+                'name' => ['required', 'string', 'max:120'],
+                'location' => ['nullable', 'string', 'max:160'],
+                'template_capacity' => ['nullable', 'integer', 'min:1', 'max:1000'],
+                // Only honoured for an operator holding `tenant.manage`; see
+                // ResolvesTargetTenant.
+                'tenant_id' => ['sometimes', 'nullable', 'uuid'],
+            ]);
 
-        $this->audit->log('device.created', $device, after: $device->getAttributes());
+            $device = Device::create([
+                ...Arr::except($validated, ['tenant_id']),
+                'status' => DeviceStatus::Provisioned,
+                'template_capacity' => $validated['template_capacity']
+                    ?? config('access.devices.default_template_capacity'),
+            ]);
 
-        // `->response()` keeps the `data` envelope that every other resource
-        // response uses; `response()->json($resource)` would silently drop it.
-        return (new DeviceResource($device))->response()->setStatusCode(201);
+            $this->audit->log('device.created', $device, after: $device->getAttributes());
+
+            // `->response()` keeps the `data` envelope that every other resource
+            // response uses; `response()->json($resource)` would silently drop it.
+            // Re-read so database defaults (is_online, enrolled_count) are in
+            // the response rather than nulls the model never loaded.
+            return (new DeviceResource($device->fresh(['tenant'])))
+                ->response()
+                ->setStatusCode(201);
+        });
     }
 
     public function update(Request $request, Device $device): DeviceResource

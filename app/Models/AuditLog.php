@@ -36,6 +36,19 @@ class AuditLog extends Model
         ];
     }
 
+    /**
+     * The one tenant-owned model that may have no tenant.
+     *
+     * A SuperAdmin's cross-tenant actions — signing in, switching tenants,
+     * clearing the switch — belong to no single tenant, and those are exactly
+     * the actions the audit trail most needs to record. Refusing to write them
+     * would lose the entries that matter most.
+     */
+    public function tenantIdIsRequired(): bool
+    {
+        return false;
+    }
+
     /** @return BelongsTo<User, $this> */
     public function user(): BelongsTo
     {
