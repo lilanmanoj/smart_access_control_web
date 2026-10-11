@@ -20,7 +20,7 @@ class AuditLogController extends Controller
         $this->authorize('viewAny', AuditLog::class);
 
         $logs = AuditLog::query()
-            ->with('user')
+            ->with(['user', 'device'])
             ->when($request->filled('action'), fn ($q) => $q->where('action', $request->string('action')))
             ->when($request->filled('search'), function ($q) use ($request): void {
                 $term = '%'.$request->string('search').'%';

@@ -19,7 +19,7 @@ use Illuminate\Database\Eloquent\Relations\MorphTo;
  * operator change", the other "what happened at the door".
  */
 #[Fillable([
-    'tenant_id', 'user_id', 'action', 'auditable_type', 'auditable_id',
+    'tenant_id', 'user_id', 'device_id', 'action', 'auditable_type', 'auditable_id',
     'before', 'after', 'ip', 'user_agent',
 ])]
 class AuditLog extends Model
@@ -53,6 +53,16 @@ class AuditLog extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    /**
+     * The panel that made the change, for the few entries a device writes.
+     *
+     * @return BelongsTo<Device, $this>
+     */
+    public function device(): BelongsTo
+    {
+        return $this->belongsTo(Device::class)->withTrashed();
     }
 
     /** @return MorphTo<Model, $this> */

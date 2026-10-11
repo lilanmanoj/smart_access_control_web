@@ -30,6 +30,11 @@ class AuditLogResource extends JsonResource
                 'name' => $this->user->name,
                 'email' => $this->user->email,
             ]),
+            'device' => $this->whenLoaded('device', fn (): ?array => $this->device === null ? null : [
+                'id' => $this->device->uuid,
+                'device_id' => $this->device->device_id,
+                'name' => $this->device->name,
+            ]),
             'created_at' => $this->created_at?->toIso8601String(),
         ];
     }

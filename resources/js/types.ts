@@ -191,6 +191,8 @@ export interface AuditLog {
     ip: string | null;
     user_agent: string | null;
     user?: { id: string; name: string; email: string } | null;
+    /** Set when a panel, not an operator, made the change. */
+    device?: { id: string; device_id: string; name: string } | null;
     created_at: string | null;
 }
 

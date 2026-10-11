@@ -9,6 +9,7 @@ use App\Http\Requests\Device\StoreEnrollmentRequest;
 use App\Http\Requests\Device\UpdateEnrollmentRequest;
 use App\Models\Member;
 use App\Services\EnrollmentService;
+use App\Services\FingerprintTemplateService;
 use Illuminate\Http\JsonResponse;
 
 /**
@@ -25,24 +26,34 @@ class EnrollmentController extends Controller
 {
     public function __construct(
         private readonly EnrollmentService $enrollments,
+        private readonly FingerprintTemplateService $templates,
     ) {}
 
     /**
      * POST /enrollments — a template has just been written to a sensor slot.
+     *
+     * Firmware 1.1+ also sends the template itself. It is read straight from
+     * the input rather than validated by the form request: a problem with it
+     * must never turn into a 422, only into `template_status: rejected`.
      */
     public function store(StoreEnrollmentRequest $request): JsonResponse
     {
         $slot = $request->validated('fingerprint_slot');
+        $slot = $slot === null ? null : (int) $slot;
 
-        $enrollment = $this->enrollments->beginFromSlot(
+        $template = $this->templates->inspect(
             $request->device(),
-            $slot === null ? null : (int) $slot,
+            $slot,
+            $request->input('fingerprint_template'),
         );
+
+        $enrollment = $this->enrollments->beginFromSlot($request->device(), $slot, $template);
 
         return response()->json([
             'member_id' => $enrollment->member->uuid,
             'enrollment_id' => $enrollment->uuid,
             'status' => $enrollment->status->value,
+            ...$template->toResponse(),
         ], 201);
     }
 

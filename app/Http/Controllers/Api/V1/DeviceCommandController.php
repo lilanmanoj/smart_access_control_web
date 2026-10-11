@@ -9,6 +9,7 @@ use App\Http\Controllers\Controller;
 use App\Models\DeviceCommand;
 use App\Services\DeviceCommandService;
 use App\Services\EnrollmentService;
+use App\Services\FingerprintTemplateService;
 use App\Support\DeviceContext;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -26,6 +27,7 @@ class DeviceCommandController extends Controller
     public function __construct(
         private readonly DeviceCommandService $commands,
         private readonly EnrollmentService $enrollments,
+        private readonly FingerprintTemplateService $templates,
     ) {}
 
     /** GET /device-commands */
@@ -78,6 +80,14 @@ class DeviceCommandController extends Controller
                 $device,
                 array_map('intval', $validated['result']['occupied_slots']),
             );
+        }
+
+        // The slot is now empty on the sensor, so our copy of its template
+        // goes too. Only on success: a failed erase leaves the finger working.
+        if ($command->type === DeviceCommandType::DeleteEnrollment
+            && $validated['status'] === 'acked'
+            && isset($command->payload['fingerprint_slot'])) {
+            $this->templates->eraseSlot($device, (int) $command->payload['fingerprint_slot']);
         }
 
         return response()->json(['acknowledged' => true]);

@@ -12,6 +12,7 @@ use App\Models\Device;
 use App\Models\Enrollment;
 use App\Models\Member;
 use App\Models\User;
+use App\Support\FingerprintTemplateIntake;
 use App\Support\PhoneNumber;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
@@ -20,26 +21,30 @@ use InvalidArgumentException;
  * Enrolment lifecycle.
  *
  * The device writes a fingerprint template into its own sensor flash and then
- * tells the backend which slot it used. The backend can never move that
- * template anywhere, so the record it keeps is only the mapping — and
- * withdrawing a member has to reach back to the device to erase the slot,
- * which is what makes the command queue load-bearing rather than a nicety.
+ * tells the backend which slot it used. The sensor's copy is the one that
+ * opens the door; since device API 1.1.0 the panel may also send the backend a
+ * copy, but nothing writes one back yet. So withdrawing a member still has to
+ * reach back to the device to erase the slot, which is what makes the command
+ * queue load-bearing rather than a nicety.
  */
 class EnrollmentService
 {
     public function __construct(
         private readonly DeviceCommandService $commands,
+        private readonly FingerprintTemplateService $templates,
     ) {}
 
     /**
      * Begin an enrolment from a freshly stored template.
      *
      * The member is created without a phone number; the device captures that
-     * on the next screen. Until then the enrolment is `pending`.
+     * on the next screen. Until then the enrolment is `pending`. A template the
+     * panel sent along is stored with it only if it was accepted — a rejected
+     * one never stops the enrolment.
      */
-    public function beginFromSlot(Device $device, ?int $slot): Enrollment
+    public function beginFromSlot(Device $device, ?int $slot, ?FingerprintTemplateIntake $template = null): Enrollment
     {
-        return DB::transaction(function () use ($device, $slot): Enrollment {
+        return DB::transaction(function () use ($device, $slot, $template): Enrollment {
             if ($slot !== null) {
                 $this->releaseConflictingSlot($device, $slot);
             }
@@ -58,6 +63,10 @@ class EnrollmentService
                 'status' => EnrollmentStatus::Pending,
                 'enrolled_at' => now(),
             ]);
+
+            if ($slot !== null && $template?->isAccepted()) {
+                $this->templates->store($device, $enrollment, $template);
+            }
 
             $this->syncEnrolledCount($device);
 
@@ -217,10 +226,13 @@ class EnrollmentService
     /**
      * A slot the sensor has overwritten belongs to whoever holds it now. This
      * happens when a template was erased on the device without the backend
-     * hearing about it, and the sensor handed the slot out again.
+     * hearing about it, and the sensor handed the slot out again. Any template
+     * we held for the slot is no longer on the sensor either.
      */
     private function releaseConflictingSlot(Device $device, int $slot): void
     {
+        $this->templates->supersedeSlot($device, $slot);
+
         $device->enrollments()
             ->holdingSlot()
             ->where('fingerprint_slot', $slot)

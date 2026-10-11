@@ -7,6 +7,7 @@ namespace App\Models;
 use App\Enums\MemberStatus;
 use App\Models\Concerns\BelongsToTenant;
 use App\Models\Concerns\HasUuid;
+use App\Services\FingerprintTemplateService;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -26,6 +27,15 @@ class Member extends Model
     use HasUuid;
     use SoftDeletes;
 
+    protected static function booted(): void
+    {
+        // Members are soft-deleted, so the cascade on fingerprint_templates
+        // never fires. Their templates must not outlive them regardless.
+        static::deleted(function (Member $member): void {
+            app(FingerprintTemplateService::class)->eraseForMember($member);
+        });
+    }
+
     protected function casts(): array
     {
         return [
@@ -38,6 +48,12 @@ class Member extends Model
     public function enrollments(): HasMany
     {
         return $this->hasMany(Enrollment::class);
+    }
+
+    /** @return HasMany<FingerprintTemplate, $this> */
+    public function fingerprintTemplates(): HasMany
+    {
+        return $this->hasMany(FingerprintTemplate::class);
     }
 
     /** @return HasMany<AccessEvent, $this> */

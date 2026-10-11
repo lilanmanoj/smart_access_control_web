@@ -86,7 +86,12 @@ export function AuditLogPage() {
                                             <Td className="whitespace-nowrap tabular-nums">
                                                 {formatDateTime(entry.created_at)}
                                             </Td>
-                                            <Td>{entry.user?.name ?? 'System'}</Td>
+                                            <Td>
+                                                {entry.user?.name ??
+                                                    (entry.device
+                                                        ? `Device ${entry.device.device_id}`
+                                                        : 'System')}
+                                            </Td>
                                             <Td>
                                                 <button
                                                     type="button"
