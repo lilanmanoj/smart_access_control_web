@@ -13,6 +13,7 @@ use App\Enums\MemberStatus;
 use App\Models\AccessEvent;
 use App\Models\Device;
 use App\Models\Enrollment;
+use App\Models\FingerprintTemplate;
 use App\Models\Member;
 use App\Models\Tenant;
 use App\Models\User;
@@ -169,7 +170,7 @@ class DemoTenantSeeder extends Seeder
     private function seedEnrollments(Device $device, array $members): void
     {
         foreach ($members as $slot => $member) {
-            Enrollment::query()->firstOrCreate(
+            $enrollment = Enrollment::query()->firstOrCreate(
                 ['device_id' => $device->id, 'member_id' => $member->id],
                 [
                     'fingerprint_slot' => $slot,
@@ -177,9 +178,28 @@ class DemoTenantSeeder extends Seeder
                     'enrolled_at' => now()->subDays(30 - $slot),
                 ]
             );
+
+            $this->seedTemplate($device, $enrollment);
         }
 
         $device->forceFill(['enrolled_count' => count($members)])->saveQuietly();
+    }
+
+    /**
+     * The copy a firmware 1.1 panel would have uploaded at enrolment.
+     * Synthetic bytes, seeded by device and slot so a reseed is a no-op.
+     */
+    private function seedTemplate(Device $device, Enrollment $enrollment): void
+    {
+        if ($enrollment->fingerprint_slot === null
+            || FingerprintTemplate::query()->where('enrollment_id', $enrollment->id)->exists()) {
+            return;
+        }
+
+        FingerprintTemplate::factory()
+            ->forEnrollment($enrollment)
+            ->seeded("{$device->device_id}-slot-{$enrollment->fingerprint_slot}")
+            ->create(['created_at' => $enrollment->enrolled_at, 'updated_at' => $enrollment->enrolled_at]);
     }
 
     /**

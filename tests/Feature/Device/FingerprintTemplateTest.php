@@ -18,6 +18,7 @@ use App\Models\FingerprintTemplate;
 use App\Models\Member;
 use App\Services\EnrollmentService;
 use App\Support\TenantContext;
+use Database\Factories\FingerprintTemplateFactory;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -110,6 +111,35 @@ class FingerprintTemplateTest extends TestCase
         ], $this->headers())
             ->assertCreated()
             ->assertJsonPath('template_status', 'stored');
+    }
+
+    /** The mock data the factory hands out is valid by the contract's rules. */
+    #[Test]
+    public function the_factorys_mock_payload_is_accepted(): void
+    {
+        $payload = FingerprintTemplateFactory::apiPayload('any-seed');
+
+        $this->enrol(7, $payload)->assertJsonPath('template_status', 'stored');
+
+        $this->assertSame(base64_decode($payload['data']), FingerprintTemplate::query()->sole()->data_encrypted);
+    }
+
+    #[Test]
+    public function the_factory_builds_a_template_for_an_enrollment(): void
+    {
+        $enrollment = Enrollment::factory()->create([
+            'tenant_id' => $this->device->tenant_id,
+            'device_id' => $this->device->id,
+            'member_id' => Member::factory()->for($this->device->tenant)->create()->id,
+            'fingerprint_slot' => 3,
+        ]);
+
+        $template = FingerprintTemplate::factory()->forEnrollment($enrollment)->seeded('s')->create();
+
+        $this->assertSame(3, $template->fingerprint_slot);
+        $this->assertSame(512, strlen($template->fresh()->data_encrypted));
+        $this->assertSame(hash('sha256', $template->fresh()->data_encrypted), $template->sha256);
+        $this->assertNull(FingerprintTemplate::factory()->forEnrollment($enrollment)->deleted()->create()->fresh()->data_encrypted);
     }
 
     // ---------------------------------------------------------------------
