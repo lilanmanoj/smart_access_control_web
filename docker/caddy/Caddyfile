@@ -1,0 +1,56 @@
+# Smart Access Control — the single public entrance on the EC2 deployment.
+#
+# Phase 1 (public IP, plain HTTP): SITE_ADDRESS=":80".
+# Phase 2 (your domain): SITE_ADDRESS="access.yourdomain.com" and Caddy
+# obtains and renews a Let's Encrypt certificate by itself. Nothing else in
+# this file changes.
+#
+# Caddy upgrades WebSocket connections through reverse_proxy automatically and
+# sets X-Forwarded-For / -Proto / -Host, which Laravel reads because
+# bootstrap/app.php trusts every proxy.
+
+{
+	admin off
+	# Where expiry notices go once a domain is configured. Harmless on :80.
+	email {$ACME_EMAIL:admin@example.com}
+}
+
+{$SITE_ADDRESS::80} {
+	encode zstd gzip
+
+	# -----------------------------------------------------------------------
+	# Reverb. These four paths are the whole websocket surface and must be
+	# matched before the catch-all:
+	#   /app/{key}        the upgrade the browser's Echo client opens
+	#   /apps/{id}/...    the HTTP API the app containers publish events to
+	# Neither Laravel nor the React router owns a path under /app or /apps.
+	# -----------------------------------------------------------------------
+	@reverb path /app /app/* /apps /apps/*
+	handle @reverb {
+		reverse_proxy reverb:8080
+	}
+
+	# -----------------------------------------------------------------------
+	# Everything else: the dashboard SPA, the admin API and the device API.
+	# -----------------------------------------------------------------------
+	handle {
+		reverse_proxy app:80 {
+			# Devices batch up to 100 access events per request and event
+			# exports stream for a while; neither should be cut short.
+			transport http {
+				read_timeout 120s
+				write_timeout 120s
+			}
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

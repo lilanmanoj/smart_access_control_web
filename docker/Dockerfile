@@ -13,8 +13,14 @@
 
 # ---------------------------------------------------------------------------
 # Stage 1 — front-end build (React + TypeScript + Vite)
+#
+# Pinned to the *build* platform, not the target. The output is a directory of
+# static JavaScript and CSS with no architecture of its own, so there is no
+# reason to run `npm ci` and `tsc` under emulation when the target differs from
+# the builder — which it does when an x86 workstation builds the arm64 image
+# the Graviton deployment runs. On a matching platform this is a no-op.
 # ---------------------------------------------------------------------------
-FROM node:22-alpine AS frontend
+FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend
 
 WORKDIR /build
 

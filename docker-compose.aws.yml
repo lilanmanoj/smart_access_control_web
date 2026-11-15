@@ -1,0 +1,178 @@
+# Smart Access Control — single-instance AWS deployment (EC2 + Docker).
+#
+# Everything the system needs runs on one box: Caddy as the public entrance,
+# the four application roles, Redis and MySQL. See docs/deploy/aws-ec2.md.
+#
+#   APP_IMAGE=<account>.dkr.ecr.<region>.amazonaws.com/smart-access-control:<sha>
+#   docker compose --env-file compose.env -f docker-compose.aws.yml up -d
+#
+# Unlike docker-compose.yml and docker-compose.prod.yml this file never builds:
+# the image is built by CI and pulled from ECR. A 2 GiB instance cannot run
+# `npm ci` and `tsc` without being OOM-killed, and a box that builds its own
+# image is a box whose running code nobody can identify.
+#
+# The repository is checked out on the instance only for this file and the
+# configuration mounted below. The application code that runs is the code
+# baked into $APP_IMAGE — editing the checkout changes nothing.
+#
+name: smart-access-control
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-app: &app
+  image: ${APP_IMAGE:?APP_IMAGE must be set - run aws/deploy.sh rather than compose directly}
+  env_file: .env
+  volumes:
+    # Only mutable state. The code itself is in the image.
+    - app-storage:/var/www/html/storage
+    # Memory tuning for a 2 GiB box; see the comments in each file.
+    - ./docker/aws/php-ec2.ini:/usr/local/etc/php/conf.d/zzz-ec2.ini:ro
+    - ./docker/aws/php-fpm.conf:/usr/local/etc/php-fpm.d/zz-app.conf:ro
+  depends_on:
+    mysql:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+  logging: *logging
+
+services:
+  # ---------------------------------------------------------------------------
+  # Caddy — the only container with a published port. Terminates TLS once a
+  # domain is pointed here, and routes /app and /apps to Reverb.
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2.9-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"      # HTTP/3, once there is a certificate
+    environment:
+      # ":80" serves the instance's public IP over plain HTTP. Replace with
+      # your hostname and Caddy provisions a certificate on first request.
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data      # certificates and ACME account keys live here
+      - caddy-config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *logging
+
+  # ---------------------------------------------------------------------------
+  # Web — nginx + PHP-FPM. Runs the migrations on boot; it is the only
+  # container that may, and there is only ever one of it.
+  # ---------------------------------------------------------------------------
+  app:
+    <<: *app
+    environment:
+      CONTAINER_ROLE: app
+      RUN_MIGRATIONS: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1/up"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+
+  # ---------------------------------------------------------------------------
+  # Queue worker — OTP delivery fan-out, access-event ingestion, webhooks.
+  # ---------------------------------------------------------------------------
+  queue:
+    <<: *app
+    environment:
+      CONTAINER_ROLE: queue
+      SKIP_OPTIMIZE: "true"
+      QUEUE_NAMES: events,notifications,default
+    depends_on:
+      app:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Scheduler — offline detection, backup-code rotation, event retention.
+  # Exactly one, always: every scheduled command takes a Redis lock, and
+  # devices:detect-offline runs every minute.
+  # ---------------------------------------------------------------------------
+  scheduler:
+    <<: *app
+    environment:
+      CONTAINER_ROLE: scheduler
+      SKIP_OPTIMIZE: "true"
+    depends_on:
+      app:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Reverb — websocket server behind Caddy's /app and /apps routes.
+  # ---------------------------------------------------------------------------
+  reverb:
+    <<: *app
+    environment:
+      CONTAINER_ROLE: reverb
+      SKIP_OPTIMIZE: "true"
+      # Reverb never touches MySQL; without this it spends a minute in the
+      # entrypoint's database probe before it starts listening.
+      SKIP_DB_WAIT: "true"
+    depends_on:
+      app:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # MySQL — on this instance, not RDS. Backed up by aws/backup-mysql.sh to S3
+  # nightly and by EBS snapshots daily. Moving to RDS later is a DB_HOST
+  # change in .env and deleting this service.
+  # ---------------------------------------------------------------------------
+  mysql:
+    image: mysql:8.4
+    command: --mysql-native-password=ON
+    # The same .env the application reads. It carries MYSQL_ROOT_PASSWORD,
+    # MYSQL_DATABASE, MYSQL_USER and MYSQL_PASSWORD alongside Laravel's DB_*
+    # names, so the credentials are written down exactly once and Compose
+    # never has to interpolate a secret. Laravel ignores the MYSQL_* names.
+    env_file: .env
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./docker/aws/mysql.cnf:/etc/mysql/conf.d/zz-ec2.cnf:ro
+    healthcheck:
+      # $$ is an escaped $: the shell inside the container expands it, so the
+      # password stays out of this file and out of `docker inspect` output.
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    restart: unless-stopped
+    logging: *logging
+
+  # ---------------------------------------------------------------------------
+  # Redis — cache, queue, sessions and Reverb's channel state.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server --appendonly yes
+      --maxmemory 192mb
+      --maxmemory-policy noeviction
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  app-storage:
+  mysql-data:
+  redis-data:
+  caddy-data:
+  caddy-config:

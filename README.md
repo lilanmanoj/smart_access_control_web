@@ -129,6 +129,20 @@ so there is one thing to build, tag and roll back.
 | `scheduler` | `schedule:work` | Offline detection, code rotation, retention |
 | `reverb` | `reverb:start` | The dashboard's live feed |
 
+### Deploying to AWS
+
+Two runbooks, both going from an empty account to a GitHub Actions pipeline that
+builds on merge to `prod`:
+
+| | | |
+|---|---|---|
+| **[aws-ec2.md](docs/deploy/aws-ec2.md)** | **~$20/month** | One `t4g.small` instance with a static Elastic IP. Caddy fronts the stack and handles certificates; MySQL and Redis are containers beside the app. Start here. |
+| [aws-fargate.md](docs/deploy/aws-fargate.md) | ~$120/month | ECS Fargate behind an ALB, with RDS and ElastiCache. Zero-downtime rolling deploys, no host to patch. Where to go if one instance stops being enough. |
+
+The application is the same in both; what differs is who runs MySQL, Redis and
+the TLS endpoint. `docker-compose.aws.yml` drives the first, task definitions
+rendered by `aws/render-taskdefs.sh` the second.
+
 ---
 
 ## How the system is shaped

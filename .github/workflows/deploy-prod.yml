@@ -1,0 +1,115 @@
+# Smart Access Control — build and deploy on merge to prod.
+#
+# Merging a pull request into `prod` is a push to `prod`, so that is the
+# trigger. Deliberately NOT pull_request_target: that runs the unmerged branch
+# with this repository's credentials available to it, which is a well-known way
+# to leak them.
+name: Deploy to production
+
+on:
+  push:
+    branches: [prod]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit to deploy (defaults to the tip of prod)"
+        required: false
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  id-token: write      # for the OIDC token exchanged for the AWS role
+  contents: read
+
+jobs:
+  deploy:
+    # A native arm64 runner, because the instance is Graviton (t4g). GitHub
+    # provides these free for public repositories. Building arm64 under QEMU
+    # on an x86 runner works but spends ten minutes emulating `npm ci`.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+
+      - name: Resolve the commit being deployed
+        id: rev
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push the application image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: prod
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ steps.rev.outputs.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:prod
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # SSM Run Command rather than SSH: no key material in this repository,
+      # no inbound port 22 on the instance, and the whole deploy is recorded in
+      # the SSM command history with its output.
+      - name: Deploy to the instance
+        env:
+          SHA: ${{ steps.rev.outputs.sha }}
+          INSTANCE_TAG: ${{ vars.INSTANCE_NAME_TAG }}
+        run: |
+          set -euo pipefail
+
+          command_id=$(aws ssm send-command \
+            --document-name AWS-RunShellScript \
+            --targets "Key=tag:Name,Values=${INSTANCE_TAG}" \
+            --comment "deploy ${SHA:0:7}" \
+            --timeout-seconds 600 \
+            --parameters "commands=['sudo /opt/smart-access/aws/deploy.sh ${SHA}']" \
+            --query 'Command.CommandId' --output text)
+
+          echo "SSM command: $command_id"
+
+          # Poll rather than `aws ssm wait`: there is no waiter for a
+          # command sent to a tag target, and we want the script's output
+          # in this log whether it succeeded or not.
+          for _ in $(seq 1 120); do
+            sleep 10
+            invocation=$(aws ssm list-command-invocations \
+              --command-id "$command_id" --details \
+              --query 'CommandInvocations[0]' --output json)
+
+            status=$(echo "$invocation" | jq -r '.Status // "Pending"')
+            echo "status: $status"
+
+            case "$status" in
+              Success)
+                echo "$invocation" | jq -r '.CommandPlugins[0].Output'
+                echo "::notice::deployed ${SHA:0:7}"
+                exit 0
+                ;;
+              Failed|Cancelled|TimedOut|Undeliverable|Terminated)
+                echo "$invocation" | jq -r '.CommandPlugins[0].Output'
+                echo "::error::deploy finished as $status"
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "::error::deploy did not finish within 20 minutes"
+          exit 1

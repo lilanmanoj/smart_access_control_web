@@ -24,6 +24,8 @@ storage/logs/*
 !.env.production.example
 
 docker-compose*.yml
+aws/
+docs/
 *.md
 !README.md
 
