@@ -75,6 +75,10 @@ class DeviceController extends Controller
                 DeviceCommandStatus::Pending->value,
                 DeviceCommandStatus::Sent->value,
             ])->latest('id'),
+            'latestTemplateSyncReport',
+        ])->loadCount([
+            'templateSlots as active_template_slots_count' => fn ($q) => $q->active(),
+            'templateSlots as releasing_template_slots_count' => fn ($q) => $q->releasing(),
         ]));
     }
 

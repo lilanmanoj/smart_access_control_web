@@ -636,6 +636,68 @@ components:
         last_health_at: { type: [string, 'null'], format: date-time }
         template_capacity: { type: integer }
         enrolled_count: { type: integer }
+        template_sync:
+          type: object
+          description: |
+            Template sync (device API 1.2.0): the last set served to this panel
+            and its last report. Never carries template bytes.
+          properties:
+            revision: { type: [string, 'null'] }
+            total: { type: [integer, 'null'], description: Entries in the last set served. }
+            truncated:
+              type: boolean
+              description: More members qualified than the sensor holds; some were left off.
+            deferred:
+              type: integer
+              description: Members waiting for a released slot to be confirmed empty.
+            served_at: { type: [string, 'null'], format: date-time }
+            active_slots: { type: integer, description: Detail view only. }
+            releasing_slots: { type: integer, description: Detail view only. }
+            last_report:
+              description: Detail view only.
+              oneOf:
+                - { $ref: '#/components/schemas/TemplateSyncReport' }
+                - { type: 'null' }
+
+    TemplateSyncReport:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [completed, partial, aborted] }
+        abort_reason: { type: [string, 'null'] }
+        revision: { type: [string, 'null'] }
+        received_at: { type: string, format: date-time }
+        written: { type: [integer, 'null'] }
+        unchanged: { type: [integer, 'null'] }
+        deleted: { type: [integer, 'null'] }
+        retained: { type: [integer, 'null'] }
+        missing: { type: [integer, 'null'] }
+        failed: { type: integer }
+        duration_ms: { type: [integer, 'null'] }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              slot: { type: integer }
+              error: { type: string }
+        drift:
+          description: |
+            The report's `slots_present` compared with the backend's
+            assignments. Null for an aborted report or one without
+            `slots_present`. Not corrected automatically.
+          oneOf:
+            - type: object
+              properties:
+                missing_slots:
+                  type: array
+                  items: { type: integer }
+                  description: Should hold a template, but the sensor has nothing there.
+                unknown_slots:
+                  type: array
+                  items: { type: integer }
+                  description: Occupied on the sensor, but no assignment exists.
+            - { type: 'null' }
 
     AccessEvent:
       type: object
