@@ -154,7 +154,7 @@ style choices, and changing them breaks real doors.
 |---|---|
 | The keypad is a 4×3 matrix — digits, `*`, `#`. **No letters.** | Every code the backend issues is six *digits*. An alphanumeric code is physically unenterable. |
 | **No real-time clock.** The device reads 1970 until NTP lands. | The server assigns every authoritative timestamp. `GET /health` returns `server_time`, which is the panel's only route to a real clock. `uptime_ms` orders events *within a batch* and nothing more. |
-| **Templates live in the sensor's flash**, in device-local slots that survive reflashes. | An enrolment is `(device, slot) → member`. Revoking has to reach back to the device to erase the slot — which is what makes the command queue load-bearing rather than a nicety. |
+| **Templates live in the sensor's flash**, in device-local slots that survive reflashes. | Slots are assigned **per device** (`device_template_slots`): a member sits in the slot they enrolled into on their own panel, and in a backend-assigned slot on every other panel. Since device API 1.2.0 each panel pulls its set (`GET /fingerprint-templates`) and deletes every slot not listed, so revoking or suspending someone means *stop listing them*. A released slot is not reused until a sync report shows it empty. |
 | **The door must open while the network is down.** | Access events queue on the panel and flush later, so ingestion accepts batched, replayed submissions keyed on an idempotency key. Backup codes are cached in plaintext on the device, deliberately. |
 | **Phone numbers cap at 14 characters** in device storage. | Normalised to E.164 server-side; anything that will not fit is refused at the edge. |
 | **The SIM800L fails in ordinary ways and reports only locally.** | E-mail is an independent channel, never a fallback triggered by an SMS failure. Server-side SMS is the recommended posture. |
@@ -250,6 +250,8 @@ tests/              Feature tests per device endpoint, isolation, replay
 | Question | File |
 |---|---|
 | How is a replayed offline batch deduplicated? | `app/Services/AccessEventRecorder.php` |
+| Which templates does a panel get, in which slot? | `app/Services/TemplateSlotService.php` |
+| How does a slot a panel reports become a member? | `TemplateSlotService::memberIdAt()` — never the enrolment's own slot |
 | How does tenant isolation actually work? | `app/Models/Scopes/TenantScope.php`, `app/Support/TenantContext.php` |
 | How is a device authenticated? | `app/Http/Middleware/AuthenticateDevice.php` |
 | Why does the trend chart not use red and green? | `resources/js/components/TrendChart.tsx` |
@@ -305,6 +307,10 @@ that matter most:
 5. **Poll and acknowledge device commands** — revocation and remote unlock are
    impossible without it.
 6. **Set the clock from `server_time`** in the health response.
+7. **Template sync (device API 1.2.0).** Pull `GET /fingerprint-templates` at
+   start-up and every `tpl_sync_hours`, mirror it, and report to
+   `POST /fingerprint-template-syncs`. With this firmware, `delete_enrollment`
+   commands are no longer executed; removal happens through the sync.
 
 Endpoints 1, 3 and 5 are live and tested; the panel can adopt them one at a
 time. The legacy `POST /otp-deliveries` is kept and accepted so existing
@@ -327,9 +333,11 @@ The brief's §12 questions were answered as follows, all reversible:
 1. **Backup codes are device-scoped**, matching the firmware — five codes that
    open *this door*, tied to no one. The consequence is stated plainly on the
    backup-codes screen: an entry made with one names no member in the log.
-2. **Enrolment is per device.** Templates are device-local, so a member is
-   enrolled at each panel they use. The schema does not prevent orchestrating
-   this later.
+2. **Enrolment happens at one panel; templates reach the rest by sync.** Since
+   device API 1.2.0 an approved member's template is pushed to every panel in
+   their tenant (a pending one only to the panel they enrolled on). There are
+   no door groups yet, so "may use this device" means every door in the tenant;
+   schedules restrict *when*, not *which*, and are enforced at decision time.
 3. **Retention defaults to 365 days** via `EVENT_RETENTION_DAYS`; unset it to
    keep events forever. Exports are not retained server-side.
 4. **The OTP flow admits any active member of the tenant.** Set

@@ -33,6 +33,10 @@ use Illuminate\Support\Facades\DB;
  */
 class AccessEventRecorder
 {
+    public function __construct(
+        private readonly TemplateSlotService $slots,
+    ) {}
+
     /**
      * Record one event.
      *
@@ -181,8 +185,10 @@ class AccessEventRecorder
     /**
      * Attribute an event to a member.
      *
-     * A device only knows slot numbers, so the backend does the lookup. An
-     * unmatched finger has no member — the denial is still recorded.
+     * A device only knows slot numbers, so the backend does the lookup — through
+     * the per-device assignments, because a member pushed to this panel sits in
+     * a different slot from the one they enrolled into elsewhere. An unmatched
+     * finger has no member; the denial is still recorded.
      *
      * @param  array<string, mixed>  $payload
      */
@@ -196,10 +202,7 @@ class AccessEventRecorder
             return null;
         }
 
-        return $device->enrollments()
-            ->holdingSlot()
-            ->where('fingerprint_slot', $slot)
-            ->value('member_id');
+        return $this->slots->memberIdAt($device, $slot);
     }
 
     /**

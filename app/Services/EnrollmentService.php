@@ -21,17 +21,22 @@ use InvalidArgumentException;
  * Enrolment lifecycle.
  *
  * The device writes a fingerprint template into its own sensor flash and then
- * tells the backend which slot it used. The sensor's copy is the one that
- * opens the door; since device API 1.1.0 the panel may also send the backend a
- * copy, but nothing writes one back yet. So withdrawing a member still has to
- * reach back to the device to erase the slot, which is what makes the command
- * queue load-bearing rather than a nicety.
+ * tells the backend which slot it used. Since device API 1.1.0 the panel also
+ * sends the backend a copy, and since 1.2.0 panels pull the template set back
+ * (`GET /fingerprint-templates`) and delete every slot it does not list. So
+ * withdrawing a member now takes effect at each panel's next template sync;
+ * the `delete_enrollment` command is still queued for older firmware, but 1.2
+ * firmware does not execute it.
+ *
+ * Every enrolment that holds a slot owns it in the per-device assignments
+ * ({@see TemplateSlotService}); the Enrollment model keeps that in step.
  */
 class EnrollmentService
 {
     public function __construct(
         private readonly DeviceCommandService $commands,
         private readonly FingerprintTemplateService $templates,
+        private readonly TemplateSlotService $slots,
     ) {}
 
     /**
@@ -66,6 +71,11 @@ class EnrollmentService
 
             if ($slot !== null && $template?->isAccepted()) {
                 $this->templates->store($device, $enrollment, $template);
+
+                // The assignment was made when the enrolment was saved, before
+                // the template existed; link it now, so the panel's own slot
+                // is listed with its bytes rather than as `template: null`.
+                $this->slots->syncEnrollment($enrollment);
             }
 
             $this->syncEnrolledCount($device);
@@ -143,10 +153,11 @@ class EnrollmentService
     /**
      * Withdraw an enrolment and tell the device to erase the template.
      *
-     * The slot is freed on our side immediately but the command may not be
-     * collected for a while; until the acknowledgement arrives, the finger
-     * still opens the door. The dashboard shows the pending command for
-     * exactly that reason.
+     * The enrolment gives up its slot on our side immediately; its assignment
+     * goes to `releasing`, so the panel deletes the template at its next
+     * template sync and the slot is reused only once a sync report shows it
+     * empty. Until then the finger still opens the door. The erase command is
+     * queued as well, for firmware that predates the sync.
      */
     public function revoke(Enrollment $enrollment, ?User $revokedBy = null): Enrollment
     {
@@ -201,8 +212,9 @@ class EnrollmentService
         // We think a slot is in use, the device does not.
         $orphaned = array_values(array_diff($ours, $occupiedSlots));
 
-        // The device holds a template we have no record of.
-        $missing = array_values(array_diff($occupiedSlots, $ours));
+        // The device holds a template we have no record of. Slots the backend
+        // assigned to pushed members are records too.
+        $missing = array_values(array_diff($occupiedSlots, $ours, $this->slots->assignedSlots($device)));
 
         if ($orphaned !== []) {
             $device->enrollments()

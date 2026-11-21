@@ -9,8 +9,10 @@ use App\Enums\AccessResult;
 use App\Enums\DenialReason;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Device\StoreAuthenticationRequest;
+use App\Models\Member;
 use App\Services\AccessDecisionService;
 use App\Services\AccessEventRecorder;
+use App\Services\TemplateSlotService;
 use Illuminate\Http\JsonResponse;
 
 /**
@@ -26,6 +28,7 @@ class AuthenticationController extends Controller
     public function __construct(
         private readonly AccessEventRecorder $events,
         private readonly AccessDecisionService $decisions,
+        private readonly TemplateSlotService $slots,
     ) {}
 
     public function store(
@@ -37,13 +40,10 @@ class AuthenticationController extends Controller
         // device-local fingerprint slot.
         $slot = (int) $request->validated('enrollment_id');
 
-        $enrollment = $device->enrollments()
-            ->active()
-            ->where('fingerprint_slot', $slot)
-            ->with('member')
-            ->first();
-
-        $member = $enrollment?->member;
+        // Through the per-device assignments: an administrator pushed to this
+        // panel sits in a different slot from the one they enrolled into.
+        $memberId = $this->slots->memberIdAt($device, $slot);
+        $member = $memberId === null ? null : Member::query()->find($memberId);
 
         $reason = match (true) {
             $member === null => DenialReason::NotEnrolled,
