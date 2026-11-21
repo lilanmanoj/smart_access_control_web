@@ -4,6 +4,7 @@ import { Layout } from '@/components/Layout';
 import { Spinner } from '@/components/ui';
 
 import { LoginPage } from '@/pages/Login';
+import { AcceptInvitationPage } from '@/pages/AcceptInvitation';
 import { DashboardPage } from '@/pages/Dashboard';
 import { DevicesPage } from '@/pages/Devices';
 import { DeviceDetailPage } from '@/pages/DeviceDetail';
@@ -33,6 +34,7 @@ export function App() {
         return (
             <Routes>
                 <Route path="/login" element={<LoginPage />} />
+                <Route path="/accept-invitation" element={<AcceptInvitationPage />} />
                 {/* Anything else while signed out lands on sign-in. Routes are
                     still declared below and guarded server-side regardless. */}
                 <Route path="*" element={<Navigate to="/login" replace />} />
@@ -43,6 +45,8 @@ export function App() {
     return (
         <Routes>
             <Route path="/login" element={<Navigate to="/" replace />} />
+            {/* Outside the layout: tells a signed-in visitor to sign out first. */}
+            <Route path="/accept-invitation" element={<AcceptInvitationPage />} />
 
             <Route element={<Layout />}>
                 <Route index element={<DashboardPage />} />

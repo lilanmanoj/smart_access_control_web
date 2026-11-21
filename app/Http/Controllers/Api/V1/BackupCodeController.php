@@ -15,8 +15,8 @@ use Illuminate\Http\JsonResponse;
  * not.
  *
  * The panel validates the response strictly: exactly five codes, exactly six
- * digits each, or it rejects the whole set and disables backup access until it
- * can refetch. That validation is the reason the shape here is rigid.
+ * digits each, or it rejects the set and keeps the one it holds. That
+ * validation is the reason the shape here is rigid.
  */
 class BackupCodeController extends Controller
 {
@@ -27,10 +27,10 @@ class BackupCodeController extends Controller
     /**
      * GET /backup-codes
      *
-     * Every fetch mints a fresh set and retires the previous one. That falls
-     * out of storing only hashes — there is no plaintext left to re-serve — and
-     * it means a panel reboot rotates the codes, which is the better posture
-     * anyway.
+     * The device's current set — the same set, codes and `issued_at` on every
+     * call until it is retired or superseded (device API 1.3.0). The panel
+     * polls this at each sync, which is how an operator's rotation reaches
+     * the door. Only an authenticated, active device gets here.
      */
     public function index(DeviceContext $context): JsonResponse
     {
@@ -48,7 +48,7 @@ class BackupCodeController extends Controller
             ], 409);
         }
 
-        $issued = $this->backupCodes->issueForDevice($device);
+        $issued = $this->backupCodes->currentForDevice($device);
 
         return response()->json([
             'set_id' => $issued['set']->uuid,

@@ -99,6 +99,15 @@ return [
             'expire' => 60,
             'throttle' => 60,
         ],
+
+        // Operator invitations. Same token table, longer life: an invitee
+        // may not open their e-mail within the hour a password reset allows.
+        'invitations' => [
+            'provider' => 'users',
+            'table' => env('AUTH_PASSWORD_RESET_TOKEN_TABLE', 'password_reset_tokens'),
+            'expire' => (int) env('INVITATION_EXPIRE_MINUTES', 4320),
+            'throttle' => 60,
+        ],
     ],
 
     /*

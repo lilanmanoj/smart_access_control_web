@@ -747,7 +747,7 @@ cat <<JSON
     { "name": "OTP_RETURN_CODE_TO_DEVICE",  "value": "false" },
     { "name": "OTP_REQUIRE_ENROLLMENT",     "value": "false" },
     { "name": "BACKUP_CODES_ONLINE_ONLY",   "value": "false" },
-    { "name": "BACKUP_CODE_MAX_AGE_DAYS",   "value": "90" },
+    { "name": "BACKUP_CODE_MAX_AGE_DAYS",   "value": "0" },
     { "name": "DEVICE_OFFLINE_AFTER_SECONDS", "value": "100" },
     { "name": "DEVICE_COMMAND_TTL_SECONDS",   "value": "300" },
     { "name": "DEVICE_REQUIRE_SIGNATURE",     "value": "false" },

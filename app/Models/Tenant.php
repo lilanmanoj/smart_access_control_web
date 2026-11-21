@@ -63,4 +63,10 @@ class Tenant extends Model
     {
         return data_get($this->settings ?? [], $key, $default);
     }
+
+    /** Whether members enrolled at a panel need an operator's approval (§9.2). */
+    public function requiresMemberApproval(): bool
+    {
+        return (bool) $this->setting('members.require_approval', config('access.members.require_approval'));
+    }
 }

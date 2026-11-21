@@ -38,6 +38,11 @@ class MemberController extends Controller
             })
             ->when($request->filled('status'), fn ($q) => $q->where('status', $request->string('status')))
             ->when($request->boolean('admins_only'), fn ($q) => $q->where('is_admin', true))
+            // Meaningful only while the tenant requires approval; otherwise
+            // nobody is waiting, whatever their row says.
+            ->when($request->boolean('awaiting_approval'), fn ($q) => app(TenantContext::class)->tenant()?->requiresMemberApproval()
+                ? $q->whereNull('approved_at')
+                : $q->whereRaw('1 = 0'))
             ->orderBy('full_name')
             ->paginate($request->integer('per_page', 25));
 
@@ -60,11 +65,19 @@ class MemberController extends Controller
 
         $validated = $this->validated($request, creating: true);
 
-        $member = Member::create($validated);
+        // Added by an operator, so approved by that operator: approval exists
+        // for people who enrolled themselves at a panel.
+        $member = Member::create([
+            ...$validated,
+            'approved_at' => now(),
+            'approved_by' => $request->user()->id,
+        ]);
 
         $this->audit->log('member.created', $member, after: $member->getAttributes());
 
-        return (new MemberResource($member))->response()->setStatusCode(201);
+        // Re-read so database defaults (status) are present: the resource
+        // reads them, and a create that omits them would otherwise 500.
+        return (new MemberResource($member->refresh()))->response()->setStatusCode(201);
     }
 
     public function update(Request $request, Member $member): MemberResource
@@ -75,6 +88,30 @@ class MemberController extends Controller
         $member->update($this->validated($request, creating: false, member: $member));
 
         $this->audit->log('member.updated', $member, $before, $member->getAttributes());
+
+        return new MemberResource($member);
+    }
+
+    /**
+     * POST /members/{member}/approval — admit a member enrolled at a panel.
+     *
+     * Idempotent: approving an approved member changes nothing and is not
+     * audited twice.
+     */
+    public function approve(Request $request, Member $member): MemberResource
+    {
+        $this->authorize('update', $member);
+
+        if ($member->approved_at === null) {
+            $member->forceFill([
+                'approved_at' => now(),
+                'approved_by' => $request->user()->id,
+            ])->save();
+
+            $this->audit->log('member.approved', $member, after: [
+                'approved_at' => $member->approved_at?->toIso8601String(),
+            ]);
+        }
 
         return new MemberResource($member);
     }

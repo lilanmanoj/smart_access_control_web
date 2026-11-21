@@ -34,6 +34,7 @@ export function UsersPage() {
     const { can, user: currentUser } = useAuth();
     const queryClient = useQueryClient();
     const [inviting, setInviting] = useState(false);
+    const [notice, setNotice] = useState<string | null>(null);
 
     const usersQuery = useQuery({
         queryKey: ['users'],
@@ -59,11 +60,24 @@ export function UsersPage() {
         mutationFn: async (payload: { name: string; email: string; roles: string[] }) => {
             await ensureCsrfCookie();
             await api.post('/users', payload);
+
+            return payload.email;
         },
-        onSuccess: () => {
+        onSuccess: (email) => {
             setInviting(false);
+            setNotice(`Invitation sent to ${email}. They choose their own password from the link in it.`);
             void queryClient.invalidateQueries({ queryKey: ['users'] });
         },
+    });
+
+    const resend = useMutation({
+        mutationFn: async (target: User) => {
+            await ensureCsrfCookie();
+            await api.post(`/users/${target.id}/invitations`);
+
+            return target.email;
+        },
+        onSuccess: (email) => setNotice(`A new invitation was sent to ${email}. Earlier links no longer work.`),
     });
 
     const changeRole = useMutation({
@@ -100,6 +114,18 @@ export function UsersPage() {
                         onSubmit={(payload) => invite.mutate(payload)}
                     />
                 </Panel>
+            )}
+
+            {notice && (
+                <p role="status" className="panel px-4 py-2 text-xs" style={{ color: 'var(--text-muted)' }}>
+                    {notice}
+                </p>
+            )}
+
+            {resend.error && (
+                <p role="alert" className="text-xs" style={{ color: 'var(--danger-text)' }}>
+                    {toApiError(resend.error).message}
+                </p>
             )}
 
             <Panel title="Operators">
@@ -183,9 +209,20 @@ export function UsersPage() {
                                                     Active
                                                 </Badge>
                                             ) : (
-                                                <Badge tone="warn" glyph="◔">
-                                                    {humanise(user.status)}
-                                                </Badge>
+                                                <span className="inline-flex flex-wrap items-center gap-2">
+                                                    <Badge tone="warn" glyph="◔">
+                                                        {humanise(user.status)}
+                                                    </Badge>
+                                                    {user.status === 'invited' && can('user.invite') && (
+                                                        <Button
+                                                            variant="ghost"
+                                                            loading={resend.isPending && resend.variables?.id === user.id}
+                                                            onClick={() => resend.mutate(user)}
+                                                        >
+                                                            Resend invitation
+                                                        </Button>
+                                                    )}
+                                                </span>
                                             )}
                                         </Td>
                                     </tr>

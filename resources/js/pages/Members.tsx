@@ -12,6 +12,7 @@ import {
     Input,
     LoadingRows,
     Panel,
+    Select,
     TableWrap,
     Td,
     Th,
@@ -27,12 +28,17 @@ export function MembersPage() {
     const queryClient = useQueryClient();
     const [search, setSearch] = useState('');
     const [adding, setAdding] = useState(false);
+    const [show, setShow] = useState<'all' | 'awaiting_approval'>('all');
 
     const { data, isPending, error, refetch } = useQuery({
-        queryKey: ['members', search],
+        queryKey: ['members', search, show],
         queryFn: async () => {
             const { data } = await api.get<Paginated<Member>>('/members', {
-                params: { search: search || undefined, per_page: 50 },
+                params: {
+                    search: search || undefined,
+                    awaiting_approval: show === 'awaiting_approval' ? 1 : undefined,
+                    per_page: 50,
+                },
             });
 
             return data;
@@ -80,13 +86,23 @@ export function MembersPage() {
             <Panel
                 title={`${data?.meta.total ?? 0} member${data?.meta.total === 1 ? '' : 's'}`}
                 actions={
-                    <Input
-                        aria-label="Search members"
-                        placeholder="Search name, phone or email"
-                        value={search}
-                        onChange={(event) => setSearch(event.target.value)}
-                        className="w-56"
-                    />
+                    <>
+                        <Select
+                            aria-label="Show members"
+                            value={show}
+                            onChange={(event) => setShow(event.target.value as typeof show)}
+                        >
+                            <option value="all">All members</option>
+                            <option value="awaiting_approval">Awaiting approval</option>
+                        </Select>
+                        <Input
+                            aria-label="Search members"
+                            placeholder="Search name, phone or email"
+                            value={search}
+                            onChange={(event) => setSearch(event.target.value)}
+                            className="w-56"
+                        />
+                    </>
                 }
             >
                 {error && (
@@ -133,6 +149,7 @@ export function MembersPage() {
                                             <MemberStatusBadge
                                                 status={member.status}
                                                 isAdmin={member.is_admin}
+                                                awaitingApproval={member.awaiting_approval}
                                             />
                                         </Td>
                                         <Td className="tabular-nums">
