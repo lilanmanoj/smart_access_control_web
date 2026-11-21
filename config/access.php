@@ -51,6 +51,22 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Members
+    |--------------------------------------------------------------------------
+    */
+
+    'members' => [
+        // Per-tenant overridable. When true, a member created by enrolment at
+        // a panel waits for an operator to approve them: until then OTP and
+        // Admin Settings refuse them, and their fingerprint stays on the panel
+        // they enrolled at (where it already works) instead of reaching every
+        // door. Members added from the dashboard are approved by whoever adds
+        // them. Off by default, which is the behaviour before this existed.
+        'require_approval' => (bool) env('MEMBER_REQUIRE_APPROVAL', false),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Backup codes
     |--------------------------------------------------------------------------
     |
@@ -60,8 +76,8 @@ return [
     */
 
     'backup_codes' => [
-        // The firmware validates for exactly five six-digit codes and rejects
-        // the whole set otherwise, disabling backup access until it refetches.
+        // The panel validates for exactly five six-digit codes and rejects the
+        // whole set otherwise, keeping the set it already holds.
         'per_set' => 5,
         'length' => 6,
 
@@ -72,7 +88,9 @@ return [
         'online_verification_only' => (bool) env('BACKUP_CODES_ONLINE_ONLY', false),
 
         // Sets older than this are rotated by the scheduler even if unused.
-        'max_age_days' => (int) env('BACKUP_CODE_MAX_AGE_DAYS', 90),
+        // 0 turns it off, which is recommended: the replacement reaches the
+        // door at its next sync, but no operator has seen its codes.
+        'max_age_days' => (int) env('BACKUP_CODE_MAX_AGE_DAYS', 0),
 
         // Failed attempts within the window before an alert is raised. Repeated
         // failures against a static secret are the clearest brute-force signal

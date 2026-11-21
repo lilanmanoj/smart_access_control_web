@@ -646,8 +646,8 @@ Track these on the firmware side; the backend depends on them.
 | 5 | Poll and acknowledge device commands. | Revocation and remote unlock are impossible without it. |
 | 6 | Set the RTC from `server_time` in the health response. | Fixes 1970 timestamps. |
 | 7 | Report firmware version, template capacity and slot inventory on health or registration. | Enables reconciliation and fleet visibility. |
-| 8 | Make the enroll/phone/backup placeholder calls real HTTP. | They currently only log to serial and branch on a compile-time test flag. |
-| 9 | Move blocking HTTP off the LVGL thread. | `netmgr_authenticate_admin()` and the backup-code refetch stall the UI for seconds. |
+| 8 | Make the enroll/phone/backup placeholder calls real HTTP. | Enrolment and backup codes cannot reach the backend otherwise. |
+| 9 | Keep the screen responsive during network calls. | The Admin Settings check and the backup-code refetch must not freeze the display. |
 
 ---
 

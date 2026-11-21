@@ -130,6 +130,12 @@ export interface Member {
     status: MemberStatus;
     /** Grants the panel's Admin Settings flow. Not an access method. */
     is_admin: boolean;
+    /**
+     * True only while the tenant requires approval and nobody has approved
+     * this member yet. OTP and Admin Settings refuse them until then.
+     */
+    awaiting_approval: boolean;
+    approved_at: string | null;
     notes: string | null;
     enrollments?: Enrollment[];
     enrollments_count?: number;
@@ -198,7 +204,10 @@ export interface BackupCodeSet {
     reason: string;
     issued_at: string;
     superseded_at: string | null;
+    /** When the door first collected this set; null while it is waiting for the door. */
     fetched_at: string | null;
+    /** The door's most recent collection of this set. */
+    last_fetched_at: string | null;
     issued_by?: string | null;
     codes?: BackupCode[];
 }

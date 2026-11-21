@@ -20,6 +20,8 @@ class MemberResource extends JsonResource
             'email' => $this->email,
             'status' => $this->status->value,
             'is_admin' => $this->is_admin,
+            'awaiting_approval' => $this->resource->awaitsApproval(),
+            'approved_at' => $this->approved_at?->toIso8601String(),
             'notes' => $this->notes,
             'enrollments' => EnrollmentResource::collection($this->whenLoaded('enrollments')),
             'enrollments_count' => $this->whenCounted('enrollments'),

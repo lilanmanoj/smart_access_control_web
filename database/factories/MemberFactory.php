@@ -25,7 +25,14 @@ class MemberFactory extends Factory
             'email' => fake()->unique()->safeEmail(),
             'status' => MemberStatus::Active,
             'is_admin' => false,
+            'approved_at' => now(),
         ];
+    }
+
+    /** Enrolled at a panel and not yet approved (§9.2). */
+    public function awaitingApproval(): static
+    {
+        return $this->state(['approved_at' => null, 'approved_by' => null]);
     }
 
     public function admin(): static

@@ -26,6 +26,12 @@ class AccessDecisionService
             return DenialReason::MemberSuspended;
         }
 
+        // Approval (§9.2) is judged against the door's tenant, which is the
+        // member's too — the device credential bound it.
+        if ($member->awaitsApproval($device->tenant)) {
+            return DenialReason::PendingApproval;
+        }
+
         if (! $this->withinSchedule($member, $device, $at ?? CarbonImmutable::now())) {
             return DenialReason::OutsideSchedule;
         }

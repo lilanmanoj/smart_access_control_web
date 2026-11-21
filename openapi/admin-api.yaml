@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Smart Access Control — Dashboard API
-  version: 1.0.0
+  version: 1.1.0
   summary: The API behind the React operator dashboard.
   description: |
     Cookie-based Sanctum session auth for a first-party SPA served from the
@@ -105,6 +105,41 @@ paths:
           description: Signed in.
         '422':
           description: The code is not valid, or the sign-in expired.
+
+  /invitation-acceptances:
+    post:
+      tags: [Authentication]
+      operationId: acceptInvitation
+      summary: An invited operator chooses their password
+      description: |
+        Unauthenticated and throttled like sign-in. The invitation e-mail links
+        to the dashboard's `/accept-invitation` page, which posts the `token`
+        and `email` from the link. Only completes an account whose status is
+        `invited`; it never resets the password of an account that is set up.
+        The invitee is not signed in — they sign in normally afterwards.
+      security: [{ XsrfToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, token, password, password_confirmation]
+              properties:
+                email: { type: string, format: email }
+                token: { type: string }
+                password: { type: string, minLength: 12 }
+                password_confirmation: { type: string }
+      responses:
+        '200': { description: Password set; the account is now active. }
+        '422':
+          description: |
+            `invitation_invalid` for an unknown address, an account that is
+            already set up, or a wrong, used or expired token (one answer for
+            all of them). Field errors for a weak or unconfirmed password.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /me:
     get:
@@ -264,7 +299,24 @@ paths:
     patch:
       tags: [Devices]
       operationId: updateDevice
-      summary: Update a device
+      summary: Update a device, including activating or deactivating it
+      description: |
+        A device created here starts `provisioned`, and the device API admits
+        only `active` devices (`403 device_provisioned` otherwise). Nothing a
+        panel sends can change that: setting `status: active` is how an
+        operator lets a new door in, and `status: suspended` shuts it out
+        again (`403 device_suspended`). Requires `device.update`; audited as
+        `device.updated` with before and after.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 120 }
+                location: { type: [string, 'null'], maxLength: 160 }
+                status: { type: string, enum: [provisioned, active, suspended, retired] }
+                template_capacity: { type: integer, minimum: 1, maximum: 1000 }
       responses:
         '200': { description: Updated. }
     delete:
@@ -312,8 +364,15 @@ paths:
       summary: Force a new backup code set
       description: |
         Requires `backupcode.rotate`. **The plaintext codes are in this
-        response and in no other** — there is no endpoint that shows them
-        again.
+        response and in no other** — no dashboard endpoint shows them again.
+
+        The previous set is superseded at once, but the door keeps accepting
+        it until it collects the new set at its next sync (start-up, then
+        every Fingerprint Sync Interval; a restart delivers it at once).
+        Watch the set's `fetched_at`: null means the door has not collected
+        it yet. An attempt with a code from the previous set is answered
+        `code_expired` on the device API and audited as
+        `backup_code.decision_mismatch`.
       responses:
         '201':
           description: A new set.
@@ -385,6 +444,13 @@ paths:
         - { name: search, in: query, schema: { type: string } }
         - { name: status, in: query, schema: { type: string } }
         - { name: admins_only, in: query, schema: { type: boolean } }
+        - name: awaiting_approval
+          in: query
+          schema: { type: boolean }
+          description: |
+            Only members waiting for approval. Empty unless the tenant
+            requires approval (`MEMBER_REQUIRE_APPROVAL`, or the tenant's
+            `members.require_approval` setting).
         - { $ref: '#/components/parameters/PerPage' }
       responses:
         '200': { description: A page of members. }
@@ -394,7 +460,12 @@ paths:
       summary: Create a member
       description: |
         `phone` is normalised to E.164 and refused if the result will not fit
-        in the panel's 14-character field.
+        in the panel's 14-character field. A member added here is approved by
+        the operator who adds them.
+
+        Member responses carry `awaiting_approval` (true only while the tenant
+        requires approval and nobody has approved the member) and
+        `approved_at`.
       responses:
         '201': { description: Created. }
 
@@ -423,6 +494,28 @@ paths:
       description: Soft-deleted — their access history must keep naming them.
       responses:
         '200': { description: Deleted. }
+
+  /members/{member}/approval:
+    parameters:
+      - name: member
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Members]
+      operationId: approveMember
+      summary: Approve a member enrolled at a panel (manual §9.2)
+      description: |
+        Requires `member.update`. Until approved — and only while the tenant
+        requires approval — OTP issuance and Admin Settings refuse the member
+        (`pending_approval` in the access log), and their fingerprint is held
+        only by the panel they enrolled at. Approving lets OTP work at once
+        and adds the fingerprint to every other panel's template set, which
+        they pick up at their next sync. Idempotent; audited once as
+        `member.approved`.
+      responses:
+        '200': { description: The member, now approved. }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /enrollments:
     get:
@@ -530,10 +623,33 @@ paths:
       summary: Invite an operator
       description: |
         Requires `user.invite`. No password is set here — the invitation
-        carries a reset link, so a password never travels through this API or
-        sits in an inbox.
+        carries a one-time link to `/accept-invitation`, so a password never
+        travels through this API or sits in an inbox. The link expires after
+        `INVITATION_EXPIRE_MINUTES` (default 4320, three days).
       responses:
         '201': { description: Invited. }
+
+  /users/{user}/invitations:
+    parameters:
+      - name: user
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Administration]
+      operationId: resendInvitation
+      summary: Send a fresh invitation link
+      description: |
+        For an invitee whose link expired or went astray. The new token
+        replaces the old one, so earlier links stop working. Refused with
+        `not_invited` for an account that is already set up.
+      responses:
+        '202': { description: Sent. }
+        '422':
+          description: "`not_invited`"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /roles:
     get:
@@ -728,8 +844,26 @@ components:
       properties:
         id: { type: string, format: uuid }
         status: { type: string, enum: [active, superseded] }
-        reason: { type: string }
+        reason:
+          type: string
+          description: |
+            Why the set exists. `rotated` — an operator rotated it, and saw the
+            codes once. `initial` — minted for the door's first fetch.
+            `after_use` — minted for the door's fetch after a code was used.
+            `expired` — the optional age-based rotation. `used` — historical
+            (before device API 1.3.0). Only a `rotated` set has codes an
+            operator has seen.
+          enum: [rotated, initial, after_use, expired, used]
         issued_at: { type: string, format: date-time }
+        superseded_at: { type: [string, 'null'], format: date-time }
+        fetched_at:
+          type: [string, 'null']
+          format: date-time
+          description: When the door first collected this set; null while waiting for the door.
+        last_fetched_at:
+          type: [string, 'null']
+          format: date-time
+          description: The door's most recent collection of this set.
         codes:
           type: array
           description: Metadata only — `last4` for display, never the code.

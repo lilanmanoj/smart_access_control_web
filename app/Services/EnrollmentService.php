@@ -54,10 +54,15 @@ class EnrollmentService
                 $this->releaseConflictingSlot($device, $slot);
             }
 
+            // Anyone can enrol at the panel, so a tenant may hold new members
+            // for approval (§9.2). Otherwise they are approved on creation,
+            // which keeps turning the requirement on later from locking out
+            // everyone enrolled before it.
             $member = Member::create([
                 'tenant_id' => $device->tenant_id,
                 'full_name' => $this->placeholderName($device, $slot),
                 'status' => MemberStatus::Active,
+                'approved_at' => $device->tenant()->first()?->requiresMemberApproval() ? null : now(),
             ]);
 
             $enrollment = Enrollment::create([

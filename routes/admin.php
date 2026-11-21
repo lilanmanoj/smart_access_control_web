@@ -12,6 +12,7 @@ use App\Http\Controllers\Admin\DeviceCommandController;
 use App\Http\Controllers\Admin\DeviceController;
 use App\Http\Controllers\Admin\DeviceCredentialController;
 use App\Http\Controllers\Admin\EnrollmentController;
+use App\Http\Controllers\Admin\InvitationAcceptanceController;
 use App\Http\Controllers\Admin\MemberController;
 use App\Http\Controllers\Admin\OtpRequestController;
 use App\Http\Controllers\Admin\TenantController;
@@ -42,6 +43,11 @@ Route::prefix('admin/v1')->name('admin.')->group(function (): void {
     Route::post('/two-factor-challenge', [AuthController::class, 'twoFactorChallenge'])
         ->middleware('throttle:6,1')
         ->name('two-factor.challenge');
+
+    // An invited operator choosing their password, from the e-mailed link.
+    Route::post('/invitation-acceptances', [InvitationAcceptanceController::class, 'store'])
+        ->middleware('throttle:6,1')
+        ->name('invitation-acceptances.store');
 
     // ---------------------------------------------------------------------
     // Authenticated.
@@ -86,6 +92,8 @@ Route::prefix('admin/v1')->name('admin.')->group(function (): void {
         // Members and enrolments
         // -----------------------------------------------------------------
         Route::apiResource('members', MemberController::class)->names('members');
+        Route::post('/members/{member}/approval', [MemberController::class, 'approve'])
+            ->name('members.approve');
         Route::put('/members/{member}/schedules', [AccessScheduleController::class, 'assignToMember'])
             ->name('members.schedules.update');
 
@@ -134,6 +142,8 @@ Route::prefix('admin/v1')->name('admin.')->group(function (): void {
         Route::apiResource('users', UserController::class)
             ->except(['show'])
             ->names('users');
+        Route::post('/users/{user}/invitations', [UserController::class, 'resendInvitation'])
+            ->name('users.invitations.store');
 
         Route::get('/audit-logs', [AuditLogController::class, 'index'])->name('audit-logs.index');
 

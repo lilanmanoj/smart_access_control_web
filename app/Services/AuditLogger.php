@@ -68,7 +68,7 @@ class AuditLogger
     {
         $sensitive = [
             'password', 'remember_token', 'api_secret', 'api_secret_hash',
-            'code_hash', 'secret', 'two_factor_secret', 'two_factor_recovery_codes',
+            'code_hash', 'codes_encrypted', 'secret', 'two_factor_secret', 'two_factor_recovery_codes',
             // Biometric, not secret, but it must never be logged either.
             'data_encrypted', 'fingerprint_template',
         ];

@@ -173,11 +173,13 @@ be counted centrally. A compatibility switch
 not been updated; it is off by default and documented as a weakness wherever it
 appears.
 
-**2. Backup codes are stored hashed.** Because only hashes exist server-side, a
-set cannot be handed out twice — so every `GET /backup-codes` mints a fresh set
-and retires the previous one, which also means a panel reboot rotates the codes.
-The device still caches the five plaintext codes, because that is the entire
-point of a method that works offline. `BACKUP_CODES_ONLINE_ONLY` (per tenant)
+**2. Backup codes are verified against hashes.** The device's current set also
+keeps its plaintext, encrypted with `APP_KEY`, so `GET /backup-codes` can return
+the same set on every call (device API 1.3.0): the panel syncs it, and an
+operator's rotation reaches the door at its next sync. That copy is deleted when
+the set is superseded or a code is used. Operators see codes once, in the
+rotation response. The device caches the five plaintext codes, because that is
+the entire point of a method that works offline. `BACKUP_CODES_ONLINE_ONLY` (per tenant)
 trades that away: the panel caches nothing and verifies through the API, losing
 offline access — which for a *backup* method may be exactly the wrong trade, so
 it is off by default.
@@ -288,7 +290,7 @@ Run by the `scheduler` container.
 |---|---|---|
 | `devices:detect-offline` | every minute | Marks a door dark after ~3 missed health polls |
 | `otp:expire` | every 5 minutes | Closes out unused one-time passwords |
-| `backup-codes:rotate-stale` | nightly | Ages out code sets sitting in a panel's RAM |
+| `backup-codes:rotate-stale` | nightly | Age-based rotation; off unless `BACKUP_CODE_MAX_AGE_DAYS` is set (0 recommended) |
 | `access-events:prune` | nightly | Applies `EVENT_RETENTION_DAYS` (unset = never) |
 
 ---

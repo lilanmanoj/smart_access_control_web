@@ -42,8 +42,11 @@ cannot work on real hardware.
 - **Tenant binding runs before route-model binding.** Middleware priority in
   `bootstrap/app.php` enforces this; without it a route binding resolves rows
   from any tenant. `tests/Feature/TenantIsolationTest.php` covers it.
-- **Secrets are never returned twice.** Device secrets, backup codes, webhook
-  signing secrets and recovery codes each exist in exactly one response.
+- **Secrets are never returned twice.** Device secrets, webhook signing
+  secrets and recovery codes each exist in exactly one response. Backup codes
+  reach an operator in exactly one response (the rotation); the only repeat is
+  `GET /backup-codes`, which re-serves the current set to its own active
+  device until the set is superseded or used.
 - **Authorisation is by permission name**, never by role string.
 - **No secret is written to a log**, including the audit log — `AuditLogger`
   redacts centrally so a new call site cannot forget.

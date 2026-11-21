@@ -17,6 +17,7 @@ use App\Models\Device;
 use App\Models\User;
 use App\Support\NumericCode;
 use Carbon\CarbonImmutable;
+use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -28,9 +29,11 @@ use Illuminate\Support\Facades\DB;
  * backup method that stops working when the backend is unreachable is not a
  * backup method.
  *
- * The mitigations are the ones available given that choice — the backend
- * stores only hashes, a used code retires its whole set immediately, sets
- * expire on age, and repeated failures raise an alert.
+ * The mitigations are the ones available given that choice — verification
+ * runs against keyed hashes, the one plaintext copy (the device's current set,
+ * encrypted at rest so the panel can sync it) is deleted the moment the set
+ * is superseded or retired, a used code retires its whole set immediately,
+ * and repeated failures raise an alert.
  *
  * A tenant that would rather lose offline operation can set
  * `access.backup_codes.online_verification_only`, after which the panel caches
@@ -41,32 +44,64 @@ class BackupCodeService
     public function __construct(
         private readonly AccessEventRecorder $events,
         private readonly DeviceCommandService $commands,
+        private readonly AuditLogger $audit,
     ) {}
 
     /**
-     * Serve a device's set for caching.
+     * Serve the device's current set (device API 1.3.0).
      *
-     * Because only hashes are stored, a set cannot be handed out twice — there
-     * is no plaintext left to hand out. So every fetch mints a fresh set and
-     * retires the previous one. That follows from the storage decision rather
-     * than working around it, and it is a better posture besides: a panel
-     * reboot rotates the codes.
+     * The panel calls this on every sync, so it must be idempotent: the same
+     * set, codes and `issued_at` on every call until the set is retired (a
+     * code was used) or superseded (an operator rotated it, or the age job
+     * did). Only when the device has no current set is one minted — `initial`
+     * for its first, `after_use` once a used set has been retired.
      *
-     * The consequence to know about: if this response is lost in transit, the
-     * panel keeps caching codes the backend has already superseded. Those
-     * attempts come back as `code_expired` rather than `code_invalid`, which
-     * tells an operator to make the device refetch instead of hunting an
-     * intruder.
+     * Each call records the collection, so the dashboard can say whether a
+     * rotated set has reached the door yet. The first collection of a set is
+     * audited; the polls after it are not.
      *
      * @return array{set: BackupCodeSet, codes: list<string>}
      */
-    public function issueForDevice(Device $device): array
+    public function currentForDevice(Device $device): array
     {
-        $issued = $this->rotate($device, reason: 'initial', notifyDevice: false);
+        return DB::transaction(function () use ($device): array {
+            // Serialise concurrent fetches from one device, so two in flight
+            // cannot each mint a set.
+            DB::table('devices')->where('id', $device->id)->lockForUpdate()->first();
 
-        $issued['set']->forceFill(['fetched_at' => now()])->save();
+            $set = $device->backupCodeSets()
+                ->where('status', BackupCodeSetStatus::Active->value)
+                ->latest('issued_at')
+                ->first();
 
-        return $issued;
+            $codes = $set === null ? null : $this->plaintextOf($set);
+
+            // A set issued before plaintext was kept, or one that no longer
+            // decrypts (the application key changed), cannot be re-served.
+            if ($set === null || $codes === null) {
+                ['set' => $set, 'codes' => $codes] = $this->rotate(
+                    $device,
+                    reason: $this->reasonForNewSet($device),
+                    notifyDevice: false,
+                );
+            }
+
+            $firstCollection = $set->fetched_at === null;
+
+            $set->forceFill([
+                'fetched_at' => $set->fetched_at ?? now(),
+                'last_fetched_at' => now(),
+            ])->save();
+
+            if ($firstCollection) {
+                $this->audit->log('backup_codes.collected', $device, after: [
+                    'set_id' => $set->uuid,
+                    'reason' => $set->reason,
+                ]);
+            }
+
+            return ['set' => $set, 'codes' => $codes];
+        });
     }
 
     /**
@@ -84,13 +119,11 @@ class BackupCodeService
         bool $notifyDevice = true,
     ): array {
         return DB::transaction(function () use ($device, $reason, $issuedBy, $notifyDevice): array {
-            $device->backupCodeSets()
-                ->where('status', BackupCodeSetStatus::Active->value)
-                ->update([
-                    'status' => BackupCodeSetStatus::Superseded->value,
-                    'superseded_at' => now(),
-                    'updated_at' => now(),
-                ]);
+            $this->supersedeActive($device);
+
+            $count = (int) config('access.backup_codes.per_set', 5);
+            $length = (int) config('access.backup_codes.length', 6);
+            $codes = NumericCode::generateSet($count, $length);
 
             $set = new BackupCodeSet([
                 'tenant_id' => $device->tenant_id,
@@ -99,13 +132,11 @@ class BackupCodeService
                 'issued_at' => now(),
                 'issued_by' => $issuedBy?->id,
                 'reason' => $reason,
+                // Kept so the panel can collect this set at each sync.
+                'codes_encrypted' => $codes,
             ]);
 
             $set->save();
-
-            $count = (int) config('access.backup_codes.per_set', 5);
-            $length = (int) config('access.backup_codes.length', 6);
-            $codes = NumericCode::generateSet($count, $length);
 
             foreach ($codes as $code) {
                 $set->codes()->create([
@@ -114,9 +145,8 @@ class BackupCodeService
                 ]);
             }
 
-            // The panel refetches after using a code, but a queued command
-            // covers the cases it would not notice: an operator-forced
-            // rotation, or an age-based one.
+            // The panel collects the new set at its next sync. The command is
+            // a hint for a panel that acts on it sooner.
             if ($notifyDevice) {
                 $this->commands->queue($device, DeviceCommandType::RefreshBackupCodes, issuedBy: $issuedBy);
             }
@@ -174,6 +204,23 @@ class BackupCodeService
     /**
      * Record one entry attempt and, when it succeeds, retire the set.
      *
+     * Two kinds of caller, told apart by whether the panel states its own
+     * verdict:
+     *
+     *  - **Cached-set panels** decide locally, send `accepted`, and report the
+     *    same attempt again through `POST /access-events`, where it is queued
+     *    while offline. That report is the access-log row: it says what
+     *    happened at the door, which is the panel's decision. Writing a second
+     *    row here would log every attempt twice and halve the brute-force
+     *    threshold. A disagreement — the panel running on a set the backend
+     *    has superseded — goes to the audit log instead.
+     *  - **Everything else** (the online-only verification path, and panels
+     *    that do not state a verdict) gets the access-log row from here.
+     *
+     * Either way a used set is retired without minting a replacement. The
+     * next `GET /backup-codes` mints one (`after_use`); nobody has seen its
+     * codes, so an operator rotates to get codes to hand out.
+     *
      * @param  bool|null  $deviceAccepted  What the panel decided locally, when it told us.
      */
     public function recordAttempt(
@@ -183,18 +230,29 @@ class BackupCodeService
     ): BackupCodeVerification {
         $verification = $this->verify($device, $code);
 
+        if ($deviceAccepted !== null) {
+            if ($deviceAccepted !== $verification->accepted) {
+                $this->audit->log('backup_code.decision_mismatch', $device, after: [
+                    'device_accepted' => $deviceAccepted,
+                    'backend_reason' => $verification->reason->value,
+                ]);
+            }
+
+            if ($verification->accepted) {
+                $this->supersedeActive($device, $verification->code?->set_id);
+            } else {
+                // This attempt's own row arrives separately, so count it here.
+                $this->checkForBruteForce($device, pending: $deviceAccepted ? 0 : 1);
+            }
+
+            return $verification;
+        }
+
         $event = $this->events->record($device, [
             'method' => AccessMethod::BackupCode,
             'result' => $verification->accepted ? AccessResult::Granted : AccessResult::Denied,
             'reason' => $verification->reason,
             'backup_code_id' => $verification->code?->id,
-            'metadata' => array_filter([
-                'device_accepted' => $deviceAccepted,
-                // A disagreement means the panel is running on a stale cache,
-                // which is worth surfacing rather than quietly reconciling.
-                'decision_mismatch' => $deviceAccepted !== null
-                    && $deviceAccepted !== $verification->accepted,
-            ], fn ($value): bool => $value !== null),
         ]);
 
         if ($verification->accepted && $verification->code !== null) {
@@ -203,7 +261,7 @@ class BackupCodeService
             }
 
             // Using any one code retires all five.
-            $this->rotate($device, reason: 'used');
+            $this->supersedeActive($device, $verification->code->set_id);
         } else {
             $this->checkForBruteForce($device);
         }
@@ -212,11 +270,54 @@ class BackupCodeService
     }
 
     /**
+     * Supersede the device's active set — or only the given one — and delete
+     * its plaintext. Used by a rotation and when a code is used.
+     */
+    private function supersedeActive(Device $device, ?int $setId = null): void
+    {
+        $device->backupCodeSets()
+            ->where('status', BackupCodeSetStatus::Active->value)
+            ->when($setId !== null, fn ($query) => $query->whereKey($setId))
+            ->update([
+                'status' => BackupCodeSetStatus::Superseded->value,
+                'superseded_at' => now(),
+                'codes_encrypted' => null,
+                'updated_at' => now(),
+            ]);
+    }
+
+    /** @return list<string>|null */
+    private function plaintextOf(BackupCodeSet $set): ?array
+    {
+        try {
+            $codes = $set->codes_encrypted;
+        } catch (DecryptException) {
+            return null;
+        }
+
+        return is_array($codes) && $codes !== [] ? array_values($codes) : null;
+    }
+
+    /**
+     * `after_use` when the device's most recent set was ended by a used code,
+     * `initial` otherwise (first contact, or a set issued before plaintext was
+     * kept).
+     */
+    private function reasonForNewSet(Device $device): string
+    {
+        $latest = $device->backupCodeSets()->latest('issued_at')->latest('id')->first();
+
+        $used = $latest !== null && $latest->codes()->whereNotNull('used_at')->exists();
+
+        return $used ? 'after_use' : 'initial';
+    }
+
+    /**
      * Repeated failures against a static secret are the clearest brute-force
      * signal this system has (§9.5). Raise it loudly rather than leaving it in
      * a log nobody reads.
      */
-    private function checkForBruteForce(Device $device): void
+    private function checkForBruteForce(Device $device, int $pending = 0): void
     {
         $threshold = (int) config('access.backup_codes.alert_threshold', 5);
         $window = (int) config('access.backup_codes.alert_window_minutes', 10);
@@ -229,7 +330,7 @@ class BackupCodeService
             ->where('method', AccessMethod::BackupCode->value)
             ->where('result', AccessResult::Denied->value)
             ->where('occurred_at', '>=', CarbonImmutable::now()->subMinutes($window))
-            ->count();
+            ->count() + $pending;
 
         if ($failures >= $threshold) {
             BackupCodeBruteForceSuspected::dispatch($device, $failures, $window);
