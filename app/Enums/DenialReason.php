@@ -23,6 +23,7 @@ enum DenialReason: string
     case NoMatch = 'no_match';
     case NotEnrolled = 'not_enrolled';
     case MemberSuspended = 'member_suspended';
+    case PendingApproval = 'pending_approval';
     case OtpExpired = 'otp_expired';
     case OtpMismatch = 'otp_mismatch';
     case CodeInvalid = 'code_invalid';
@@ -45,6 +46,7 @@ enum DenialReason: string
             self::NoMatch => 'No fingerprint match',
             self::NotEnrolled => 'Slot not enrolled',
             self::MemberSuspended => 'Member suspended',
+            self::PendingApproval => 'Awaiting approval',
             self::OtpExpired => 'OTP expired',
             self::OtpMismatch => 'Wrong OTP',
             self::CodeInvalid => 'Invalid backup code',

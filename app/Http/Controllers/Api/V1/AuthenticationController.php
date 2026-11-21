@@ -18,10 +18,12 @@ use Illuminate\Http\JsonResponse;
 /**
  * POST /authentications — the Admin Settings gate.
  *
- * The firmware grants only on `"is_admin": true`. Anything else — a non-200, a
- * missing field, a transport failure — denies, and the flow is refused
- * outright when the backend is unreachable. That is the correct direction for
- * this endpoint to fail in, and nothing here should undermine it.
+ * Answers `"is_admin": true` only for a slot that maps, through this device's
+ * slot assignments, to a device administrator the door admits right now (not
+ * suspended, approved, inside any schedule); `false` for everyone else. An
+ * unaccepted credential is a 401 and an inactive device a 403, both from the
+ * device middleware before this runs. See `POST /authentications` in
+ * openapi/device-api-v1.yaml.
  */
 class AuthenticationController extends Controller
 {

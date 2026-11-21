@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Admin;
 
+use App\Exceptions\ApiException;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\UserResource;
 use App\Models\User;
@@ -72,8 +73,7 @@ class UserController extends Controller
 
         $user->syncRoles($validated['roles']);
 
-        $token = Password::broker()->createToken($user);
-        $user->notify(new UserInvitationNotification($token, $request->user()->name));
+        $this->sendInvitation($user, $request->user());
 
         $this->audit->log('user.invited', $user, after: [
             'email' => $user->email,
@@ -81,6 +81,32 @@ class UserController extends Controller
         ]);
 
         return (new UserResource($user->load('roles')))->response()->setStatusCode(201);
+    }
+
+    /**
+     * POST /users/{user}/invitations — send a fresh invitation link.
+     *
+     * For an invitee whose link expired or went astray. Issuing a new token
+     * replaces the old one, so only the newest link works.
+     */
+    public function resendInvitation(Request $request, User $user): JsonResponse
+    {
+        $this->authorize('invite', User::class);
+        $this->authorize('update', $user);
+
+        if ($user->status !== 'invited') {
+            throw new ApiException(
+                'not_invited',
+                'This account has already been set up, so there is no invitation to resend.',
+                422
+            );
+        }
+
+        $this->sendInvitation($user, $request->user());
+
+        $this->audit->log('user.invitation_resent', $user, after: ['email' => $user->email]);
+
+        return response()->json(['ok' => true], 202);
     }
 
     public function update(Request $request, User $user): UserResource
@@ -127,6 +153,17 @@ class UserController extends Controller
      *
      * @param  list<string>  $roles
      */
+    /**
+     * The link carries a token, never a password: the invitee chooses their
+     * own on the accept-invitation page.
+     */
+    private function sendInvitation(User $user, User $invitedBy): void
+    {
+        $token = Password::broker('invitations')->createToken($user);
+
+        $user->notify(new UserInvitationNotification($token, $invitedBy->name));
+    }
+
     private function assertAssignableRoles(Request $request, array $roles): void
     {
         if (in_array('super_admin', $roles, true) && ! $request->user()->isSuperAdmin()) {

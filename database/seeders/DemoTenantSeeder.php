@@ -158,6 +158,7 @@ class DemoTenantSeeder extends Seeder
                     'full_name' => $name,
                     'email' => $email,
                     'is_admin' => $isAdmin,
+                    'approved_at' => now(),
                     'status' => $index === 4 ? MemberStatus::Suspended : MemberStatus::Active,
                 ]
             );

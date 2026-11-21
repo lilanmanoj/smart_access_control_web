@@ -240,12 +240,19 @@ class TemplateSlotService
         $templateIdByEnrollment = $templates->mapWithKeys(fn ($t): array => [(int) $t->enrollment_id => (int) $t->id]);
 
         // Members enrolled elsewhere may only come here once approved: active,
-        // not deleted, and holding at least one active enrolment.
+        // not deleted, holding at least one active enrolment and — when the
+        // tenant requires it — approved by an operator (§9.2). A member
+        // waiting for approval keeps working at the panel they enrolled at,
+        // which the `$here` set above already covers.
         $hereMembers = $here->pluck('member_id')->map(fn ($id): int => (int) $id)->flip();
 
         $approved = Member::query()
             ->where('tenant_id', $tenantId)
             ->where('status', MemberStatus::Active->value)
+            ->when(
+                $device->tenant()->first()?->requiresMemberApproval() ?? false,
+                fn ($query) => $query->approved(),
+            )
             ->whereIn('id', $templates->pluck('member_id')->unique()->values())
             ->whereHas('enrollments', fn ($enrollment) => $enrollment->where('status', EnrollmentStatus::Active->value))
             ->pluck('id')

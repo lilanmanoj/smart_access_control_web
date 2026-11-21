@@ -42,6 +42,17 @@ export function MemberDetailPage() {
         },
     });
 
+    const approve = useMutation({
+        mutationFn: async () => {
+            await ensureCsrfCookie();
+            await api.post(`/members/${memberId}/approval`);
+        },
+        onSuccess: () => {
+            void queryClient.invalidateQueries({ queryKey: ['member', memberId] });
+            void queryClient.invalidateQueries({ queryKey: ['members'] });
+        },
+    });
+
     const remove = useMutation({
         mutationFn: async () => {
             await ensureCsrfCookie();
@@ -83,12 +94,42 @@ export function MemberDetailPage() {
                 </Link>
                 <h1 className="mt-1 flex flex-wrap items-center gap-2 text-lg font-semibold">
                     {data.full_name}
-                    <MemberStatusBadge status={data.status} isAdmin={data.is_admin} />
+                    <MemberStatusBadge
+                        status={data.status}
+                        isAdmin={data.is_admin}
+                        awaitingApproval={data.awaiting_approval}
+                    />
                 </h1>
                 <p className="text-xs" style={{ color: 'var(--text-subtle)' }}>
                     Added {formatDateTime(data.created_at)}
                 </p>
             </header>
+
+            {data.awaiting_approval && can('member.update') && (
+                <Panel
+                    title="Approval"
+                    description="This member enrolled at a door and is waiting for an administrator"
+                    className="p-4"
+                >
+                    <p className="mb-3 text-xs" style={{ color: 'var(--text-muted)' }}>
+                        Until approved, OTP is refused and Admin Settings will not open for them. Their
+                        fingerprint works only at the door where they enrolled. Approving lets OTP work
+                        at once, and sends their fingerprint to the other doors at their next sync.
+                    </p>
+                    <Button
+                        variant="primary"
+                        loading={approve.isPending}
+                        onClick={() => approve.mutate()}
+                    >
+                        Approve member
+                    </Button>
+                    {approve.error && (
+                        <span role="alert" className="ml-3 text-xs" style={{ color: 'var(--danger-text)' }}>
+                            {toApiError(approve.error).message}
+                        </span>
+                    )}
+                </Panel>
+            )}
 
             {can('member.update') && (
                 <Panel title="Details" className="p-4">
@@ -155,7 +196,7 @@ export function MemberDetailPage() {
                                                     onClick={() => {
                                                         if (
                                                             window.confirm(
-                                                                'Revoke this enrolment? The erase reaches the sensor at the device’s next poll; until then the finger still works.',
+                                                                'Revoke this enrolment? The panel deletes the template at its next template sync — until then the finger still opens the door.',
                                                             )
                                                         ) {
                                                             revoke.mutate(enrollment.id);

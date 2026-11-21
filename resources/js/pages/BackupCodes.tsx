@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api, toApiError } from '@/lib/api';
-import { formatDateTime, humanise } from '@/lib/format';
+import { formatDateTime } from '@/lib/format';
+import { BackupDeliveryBadge, backupReasonLabel } from '@/components/status';
 import {
     Badge,
     EmptyState,
@@ -15,12 +16,11 @@ import {
 import type { BackupCodeSet, Paginated } from '@/types';
 
 /**
- * Backup code history.
+ * Backup code history, with whether each set reached its door.
  *
- * Only metadata and the last four digits: the codes are stored as keyed
- * hashes, and the plaintext exists in exactly one response — the one that
- * generated them. Rotation lives on the device page, next to the door it
- * affects.
+ * Only metadata and the last four digits: an operator sees the codes in
+ * exactly one response, the rotation that generated them. Rotation lives on
+ * the device page, next to the door it affects.
  */
 export function BackupCodesPage() {
     const { data, isPending, error, refetch } = useQuery({
@@ -40,8 +40,10 @@ export function BackupCodesPage() {
             <header>
                 <h1 className="text-lg font-semibold">Backup codes</h1>
                 <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
-                    Five six-digit codes per door, cached on the panel so it still opens when the
-                    network is down. Using any one retires the whole set.
+                    Five six-digit codes per door, held on the panel so it still opens when the
+                    network is down. The door collects its current set at start-up and with every
+                    fingerprint sync. Using any one code ends the whole set; rotate again to get
+                    codes you can hand out.
                 </p>
             </header>
 
@@ -66,7 +68,7 @@ export function BackupCodesPage() {
                 {data?.data.length === 0 && (
                     <EmptyState
                         title="No sets issued"
-                        description="A device gets its first set the moment it asks for one."
+                        description="A door gets its first set at its first sync."
                     />
                 )}
 
@@ -79,6 +81,7 @@ export function BackupCodesPage() {
                                     <Th>State</Th>
                                     <Th>Issued</Th>
                                     <Th>Why</Th>
+                                    <Th>Delivery</Th>
                                     <Th>Codes</Th>
                                 </tr>
                             </thead>
@@ -116,7 +119,21 @@ export function BackupCodesPage() {
                                                 {formatDateTime(set.issued_at)}
                                             </Td>
                                             <Td style={{ color: 'var(--text-muted)' }}>
-                                                {humanise(set.reason)}
+                                                {backupReasonLabel(set.reason)}
+                                            </Td>
+                                            <Td>
+                                                <span className="flex flex-col items-start gap-0.5">
+                                                    <BackupDeliveryBadge set={set} />
+                                                    {set.fetched_at && (
+                                                        <span
+                                                            className="text-xs"
+                                                            style={{ color: 'var(--text-muted)' }}
+                                                        >
+                                                            {set.status === 'active' ? 'since' : 'from'}{' '}
+                                                            {formatDateTime(set.fetched_at)}
+                                                        </span>
+                                                    )}
+                                                </span>
                                             </Td>
                                             <Td>
                                                 <span className="flex flex-wrap gap-1 font-mono text-xs">

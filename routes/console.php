@@ -25,8 +25,8 @@ Schedule::command('otp:expire')
     ->everyFiveMinutes()
     ->withoutOverlapping();
 
-// Backup codes sit in a panel's RAM in plaintext, so a short set lifetime is
-// one of the few mitigations that choice leaves. Applied nightly.
+// Age-based backup-code rotation. Does nothing unless BACKUP_CODE_MAX_AGE_DAYS
+// is set; the replacement set reaches the door, but no operator has seen it.
 Schedule::command('backup-codes:rotate-stale')
     ->dailyAt('03:15')
     ->withoutOverlapping();

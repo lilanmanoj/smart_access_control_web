@@ -5,6 +5,9 @@ import { api, ensureCsrfCookie, toApiError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { formatDateTime, formatRelative, humanise } from '@/lib/format';
 import {
+    BackupDeliveryBadge,
+    backupReasonLabel,
+    backupSetWasSeen,
     CommandStatusBadge,
     DeviceStateBadge,
     EnrollmentStatusBadge,
@@ -111,6 +114,20 @@ export function DeviceDetailPage() {
         onSuccess: invalidate,
     });
 
+    // The device API admits only an active panel. A new one starts
+    // provisioned and stays refused until somebody decides to let it in;
+    // deactivating is the same switch in the other direction.
+    const setStatus = useMutation({
+        mutationFn: async (status: 'active' | 'suspended') => {
+            await ensureCsrfCookie();
+            await api.patch(`/devices/${deviceId}`, { status });
+        },
+        onSuccess: () => {
+            invalidate();
+            void queryClient.invalidateQueries({ queryKey: ['devices'] });
+        },
+    });
+
     if (deviceQuery.error) {
         return (
             <ErrorState
@@ -149,6 +166,32 @@ export function DeviceDetailPage() {
                 </div>
 
                 <div className="flex flex-wrap gap-2">
+                    {can('device.update') && device.status !== 'active' && (
+                        <Button
+                            variant="primary"
+                            loading={setStatus.isPending}
+                            onClick={() => setStatus.mutate('active')}
+                        >
+                            Activate
+                        </Button>
+                    )}
+                    {can('device.update') && device.status === 'active' && (
+                        <Button
+                            variant="danger"
+                            loading={setStatus.isPending}
+                            onClick={() => {
+                                if (
+                                    window.confirm(
+                                        `Deactivate ${device.name}? The panel is refused by the portal from its next request: OTP and backup codes stop working there, and it shows "No service". Fingerprints stored in its sensor still open the door.`,
+                                    )
+                                ) {
+                                    setStatus.mutate('suspended');
+                                }
+                            }}
+                        >
+                            Deactivate
+                        </Button>
+                    )}
                     {can('device.unlock') && (
                         <Button
                             variant="primary"
@@ -161,13 +204,40 @@ export function DeviceDetailPage() {
                     {can('backupcode.rotate') && (
                         <Button
                             loading={rotateCodes.isPending}
-                            onClick={() => rotateCodes.mutate()}
+                            onClick={() => {
+                                if (
+                                    window.confirm(
+                                        `Rotate the backup codes for ${device.name}? You see the new codes once, so download them. The door keeps accepting the current codes until it collects the new set at its next sync.`,
+                                    )
+                                ) {
+                                    rotateCodes.mutate();
+                                }
+                            }}
                         >
                             Rotate backup codes
                         </Button>
                     )}
                 </div>
             </header>
+
+            {device.status !== 'active' && (
+                <p
+                    role="status"
+                    className="panel px-4 py-2 text-xs"
+                    style={{ borderColor: 'var(--warn)', color: 'var(--warn-text)' }}
+                >
+                    <span aria-hidden="true">! </span>
+                    {device.status === 'provisioned'
+                        ? 'This door is not activated yet. The portal refuses it until you press Activate, so its status bar shows "No service".'
+                        : 'This door is deactivated. The portal refuses it, so OTP and backup codes do not work there. Press Activate to let it back in.'}
+                </p>
+            )}
+
+            {setStatus.error && (
+                <p role="alert" className="text-xs" style={{ color: 'var(--danger-text)' }}>
+                    {toApiError(setStatus.error).message}
+                </p>
+            )}
 
             {unlock.isSuccess && (
                 <p
@@ -185,9 +255,16 @@ export function DeviceDetailPage() {
             {issuedCodes && (
                 <RevealOnce
                     title="New backup codes"
-                    warning="These are shown once. Write them down before you close this."
+                    warning="These are shown once. Download them or write them down before you close this."
                     onDismiss={() => setIssuedCodes(null)}
                 >
+                    <p className="text-xs">
+                        They start working when the door collects them at its next sync: at start-up,
+                        then every Fingerprint Sync Interval (3 hours by default). Switch the door off
+                        and on to deliver them now. Until then the door keeps accepting the previous
+                        codes. Hand these out once the <strong>Backup codes</strong> panel below shows{' '}
+                        <strong>On the door</strong>.
+                    </p>
                     <ul className="flex flex-wrap gap-2">
                         {issuedCodes.map((code) => (
                             <li
@@ -199,6 +276,11 @@ export function DeviceDetailPage() {
                             </li>
                         ))}
                     </ul>
+                    <div>
+                        <Button onClick={() => downloadCodes(device.name, issuedCodes)}>
+                            Download codes
+                        </Button>
+                    </div>
                 </RevealOnce>
             )}
 
@@ -229,13 +311,13 @@ export function DeviceDetailPage() {
                             label="Templates stored"
                             value={`${device.enrolled_count} of ${device.template_capacity}`}
                         />
-                        <Row label="Administrative state" value={humanise(device.status)} />
+                        <Row label="Administrative state" value={ADMIN_STATE_LABEL[device.status]} />
                     </dl>
                 </Panel>
 
                 <Panel
                     title="Backup codes"
-                    description="Metadata only — the codes themselves are stored hashed"
+                    description="The door collects its set at start-up and with every fingerprint sync"
                     className="p-4"
                 >
                     {device.active_backup_code_set ? (
@@ -245,9 +327,34 @@ export function DeviceDetailPage() {
                                 value={formatDateTime(device.active_backup_code_set.issued_at)}
                             />
                             <Row
-                                label="Reason"
-                                value={humanise(device.active_backup_code_set.reason)}
+                                label="Why"
+                                value={backupReasonLabel(device.active_backup_code_set.reason)}
                             />
+                            <div className="flex items-baseline justify-between gap-3">
+                                <dt style={{ color: 'var(--text-muted)' }}>Delivery</dt>
+                                <dd>
+                                    <BackupDeliveryBadge set={device.active_backup_code_set} />
+                                </dd>
+                            </div>
+                            {device.active_backup_code_set.fetched_at && (
+                                <Row
+                                    label="On the door since"
+                                    value={formatDateTime(device.active_backup_code_set.fetched_at)}
+                                />
+                            )}
+                            {device.active_backup_code_set.last_fetched_at && (
+                                <Row
+                                    label="Last collected"
+                                    value={formatRelative(device.active_backup_code_set.last_fetched_at)}
+                                />
+                            )}
+                            {!backupSetWasSeen(device.active_backup_code_set.reason) && (
+                                <p role="note" style={{ color: 'var(--warn-text)' }}>
+                                    <span aria-hidden="true">! </span>
+                                    Nobody has seen these codes: the portal made this set for the door
+                                    itself. Rotate to get codes you can hand out.
+                                </p>
+                            )}
                             <div className="mt-1 flex flex-wrap gap-1.5">
                                 {device.active_backup_code_set.codes?.map((code) => (
                                     <span
@@ -268,7 +375,8 @@ export function DeviceDetailPage() {
                         </div>
                     ) : (
                         <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
-                            No set issued yet. The panel gets one the first time it asks.
+                            No set yet. The door gets one at its first sync. Rotate to get codes you
+                            can hand out.
                         </p>
                     )}
                 </Panel>
@@ -558,6 +666,43 @@ function TemplateSyncPanel({ sync, capacity }: { sync: TemplateSync; capacity: n
             </div>
         </Panel>
     );
+}
+
+/** Matches the wording of the Activate / Deactivate buttons. */
+const ADMIN_STATE_LABEL: Record<Device['status'], string> = {
+    provisioned: 'Not activated',
+    active: 'Active',
+    suspended: 'Deactivated',
+    retired: 'Retired',
+};
+
+/**
+ * Save the codes from the one dashboard response that carries them. Built in
+ * the browser from data already on screen, so the server never sends them to
+ * an operator twice.
+ */
+function downloadCodes(deviceName: string, codes: string[]): void {
+    const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    const text = [
+        `Backup codes for ${deviceName}`,
+        `Issued ${stamp} (UTC)`,
+        '',
+        ...codes,
+        '',
+        'They start working once the door has collected them (its next sync,',
+        'or at once after a restart).',
+        'Using any one code ends all five. Rotate again for new codes.',
+        '',
+    ].join('\n');
+
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `backup-codes-${deviceName.replace(/[^A-Za-z0-9_-]+/g, '-')}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
 }
 
 function Row({ label, value }: { label: string; value: string }) {
