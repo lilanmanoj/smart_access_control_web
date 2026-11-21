@@ -8,10 +8,12 @@ use App\Enums\MemberStatus;
 use App\Models\Concerns\BelongsToTenant;
 use App\Models\Concerns\HasUuid;
 use App\Services\FingerprintTemplateService;
+use App\Support\TenantContext;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
@@ -19,7 +21,7 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 /**
  * A person who walks through doors.
  */
-#[Fillable(['tenant_id', 'full_name', 'phone', 'email', 'status', 'is_admin', 'notes'])]
+#[Fillable(['tenant_id', 'full_name', 'phone', 'email', 'status', 'is_admin', 'approved_at', 'approved_by', 'notes'])]
 class Member extends Model
 {
     use BelongsToTenant;
@@ -41,6 +43,7 @@ class Member extends Model
         return [
             'is_admin' => 'boolean',
             'status' => MemberStatus::class,
+            'approved_at' => 'datetime',
         ];
     }
 
@@ -81,9 +84,40 @@ class Member extends Model
         return $this->status === MemberStatus::Active;
     }
 
+    /** @return BelongsTo<User, $this> */
+    public function approvedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'approved_by');
+    }
+
+    /**
+     * Whether this member is still waiting for an operator's approval.
+     *
+     * Only ever true while the tenant requires approval: switching the
+     * requirement off admits everyone waiting, without rewriting their rows.
+     */
+    public function awaitsApproval(?Tenant $tenant = null): bool
+    {
+        if ($this->approved_at !== null) {
+            return false;
+        }
+
+        $tenant ??= $this->relationLoaded('tenant')
+            ? $this->tenant
+            : (app(TenantContext::class)->tenant() ?? $this->tenant()->first());
+
+        return $tenant?->requiresMemberApproval() ?? false;
+    }
+
     /** @param  Builder<Member>  $query */
     public function scopeActive(Builder $query): void
     {
         $query->where('status', MemberStatus::Active->value);
+    }
+
+    /** @param  Builder<Member>  $query */
+    public function scopeApproved(Builder $query): void
+    {
+        $query->whereNotNull('approved_at');
     }
 }

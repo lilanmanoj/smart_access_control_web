@@ -8,6 +8,7 @@ use App\Enums\BackupCodeSetStatus;
 use App\Models\Concerns\BelongsToTenant;
 use App\Models\Concerns\HasUuid;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -18,8 +19,14 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  *
  * Using any single code supersedes the whole set — modelled as a new row so
  * "which codes were live on this door last Tuesday" stays answerable.
+ *
+ * The device's current set also keeps its plaintext, encrypted with the
+ * application key, so the panel can collect the same set on every sync. Only
+ * the device API reads it; it is hidden from serialisation and cleared when
+ * the set is superseded or retired.
  */
-#[Fillable(['tenant_id', 'device_id', 'status', 'issued_at', 'issued_by', 'reason'])]
+#[Fillable(['tenant_id', 'device_id', 'status', 'issued_at', 'issued_by', 'reason', 'codes_encrypted'])]
+#[Hidden(['codes_encrypted'])]
 class BackupCodeSet extends Model
 {
     use BelongsToTenant;
@@ -33,6 +40,8 @@ class BackupCodeSet extends Model
             'issued_at' => 'datetime',
             'superseded_at' => 'datetime',
             'fetched_at' => 'datetime',
+            'last_fetched_at' => 'datetime',
+            'codes_encrypted' => 'encrypted:array',
         ];
     }
 
@@ -57,6 +66,12 @@ class BackupCodeSet extends Model
     public function isActive(): bool
     {
         return $this->status === BackupCodeSetStatus::Active;
+    }
+
+    /** True once the device has collected this set at least once. */
+    public function isOnDevice(): bool
+    {
+        return $this->fetched_at !== null;
     }
 
     public function isStale(): bool

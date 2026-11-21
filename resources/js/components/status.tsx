@@ -1,6 +1,7 @@
 import { Badge } from './ui';
 import type {
     AccessResult,
+    BackupCodeSet,
     Device,
     DeviceStatus,
     EnrollmentStatus,
@@ -59,16 +60,19 @@ export function AdministrativeStateBadge({ status }: { status: DeviceStatus }) {
                     Active
                 </Badge>
             );
+        // A provisioned panel is refused by the device API until an operator
+        // activates it, so "awaiting first contact" would promise something
+        // that never happens on its own.
         case 'provisioned':
             return (
                 <Badge tone="warn" glyph="◔">
-                    Awaiting first contact
+                    Not activated
                 </Badge>
             );
         case 'suspended':
             return (
                 <Badge tone="danger" glyph="⏸">
-                    Suspended
+                    Deactivated
                 </Badge>
             );
         case 'retired':
@@ -80,10 +84,22 @@ export function AdministrativeStateBadge({ status }: { status: DeviceStatus }) {
     }
 }
 
-export function MemberStatusBadge({ status, isAdmin }: { status: MemberStatus; isAdmin?: boolean }) {
+export function MemberStatusBadge({
+    status,
+    isAdmin,
+    awaitingApproval,
+}: {
+    status: MemberStatus;
+    isAdmin?: boolean;
+    awaitingApproval?: boolean;
+}) {
     return (
         <span className="inline-flex items-center gap-1.5">
-            {status === 'active' ? (
+            {status === 'active' && awaitingApproval ? (
+                <Badge tone="warn" glyph="◔">
+                    Awaiting approval
+                </Badge>
+            ) : status === 'active' ? (
                 <Badge tone="ok" glyph="✓">
                     Active
                 </Badge>
@@ -200,6 +216,56 @@ export function TemplateSyncBadge({ status }: { status: TemplateSyncStatus | nul
                 </Badge>
             );
     }
+}
+
+/**
+ * Whether the door has collected a backup-code set. The door syncs its set at
+ * start-up and then with every fingerprint template sync, so a rotated set
+ * spends a while waiting; until it is on the door, the codes in it do not
+ * open anything and the previous set still does.
+ */
+export function BackupDeliveryBadge({ set }: { set: Pick<BackupCodeSet, 'status' | 'fetched_at'> }) {
+    if (set.status !== 'active') {
+        return set.fetched_at ? (
+            <Badge tone="neutral" glyph="✓">
+                Was on the door
+            </Badge>
+        ) : (
+            <Badge tone="neutral" glyph="—">
+                Never collected
+            </Badge>
+        );
+    }
+
+    return set.fetched_at ? (
+        <Badge tone="ok" glyph="✓">
+            On the door
+        </Badge>
+    ) : (
+        <Badge tone="warn" glyph="◌">
+            Waiting for the door
+        </Badge>
+    );
+}
+
+const BACKUP_REASON_LABEL: Record<string, string> = {
+    rotated: 'Rotated by an operator',
+    initial: "Door's first set",
+    after_use: 'After a code was used',
+    used: 'After a code was used',
+    expired: 'Age limit reached',
+};
+
+export function backupReasonLabel(reason: string): string {
+    return BACKUP_REASON_LABEL[reason] ?? reason.replace(/_/g, ' ');
+}
+
+/**
+ * Only a rotation shows an operator the codes. Every other set was minted for
+ * the door itself, so nobody can hand its codes out.
+ */
+export function backupSetWasSeen(reason: string): boolean {
+    return reason === 'rotated';
 }
 
 /**

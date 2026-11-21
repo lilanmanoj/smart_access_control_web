@@ -201,8 +201,10 @@ class DeviceController extends Controller
     /**
      * POST /devices/{device}/backup-codes/rotations — force a new set.
      *
-     * The plaintext codes are in this response and in no other. There is no
-     * endpoint that shows them again.
+     * The plaintext codes are in this response and in no other dashboard
+     * response; no endpoint shows them to an operator again. The door
+     * collects the new set at its next sync and keeps accepting the previous
+     * set until then.
      */
     public function rotateBackupCodes(Request $request, Device $device): JsonResponse
     {
@@ -217,7 +219,8 @@ class DeviceController extends Controller
         return response()->json([
             'set' => new BackupCodeSetResource($issued['set']->load('codes')),
             'codes' => $issued['codes'],
-            'warning' => 'These codes are shown once. Record them now.',
+            'warning' => 'These codes are shown once. Record them now. The door '.
+                'starts accepting them at its next sync.',
         ], 201);
     }
 

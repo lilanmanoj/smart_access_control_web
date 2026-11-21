@@ -23,6 +23,18 @@ class UserInvitationNotification extends Notification
         return ['mail'];
     }
 
+    /** Human wording of the invitation broker's token lifetime. */
+    private function expiry(): string
+    {
+        $minutes = (int) config('auth.passwords.invitations.expire', 4320);
+
+        return match (true) {
+            $minutes % 1440 === 0 => ($minutes / 1440).' day'.($minutes === 1440 ? '' : 's'),
+            $minutes % 60 === 0 => ($minutes / 60).' hour'.($minutes === 60 ? '' : 's'),
+            default => $minutes.' minutes',
+        };
+    }
+
     public function toMail(object $notifiable): MailMessage
     {
         // The SPA owns this route and exchanges the token for a password.
@@ -35,7 +47,7 @@ class UserInvitationNotification extends Notification
             ->greeting("Hello {$notifiable->name},")
             ->line("{$this->invitedBy} has invited you to manage access control at ".config('app.name').'.')
             ->action('Set your password', $url)
-            ->line('This link expires in 60 minutes.')
+            ->line('This link expires in '.$this->expiry().'.')
             ->line('If you were not expecting this invitation, you can ignore it.');
     }
 }

@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Smart Access Control — Device API
-  version: 1.2.0
+  version: 1.3.0
   summary: The contract between an ESP32-S3 access panel and the backend.
   description: |
     Every path here is appended directly to the device's configured
@@ -73,6 +73,21 @@ info:
     * Slot numbers become per-device assignments the backend owns (see the
       sync endpoint). Every lookup of `(device, fingerprint_slot) → member` —
       access events, `/authentications`, enrolments — must go through them.
+
+    ### Changed in 1.3.0: backup codes are a synced set
+
+    * `GET /backup-codes` returns the device's **current** set, and the same
+      set on every call. It mints a new set only when the device has no
+      current one: first contact, or the previous set was retired because a
+      code was accepted. It no longer rotates on every call, so a panel reboot
+      no longer changes the codes.
+    * An administrator's rotation in the portal makes a new current set. The
+      panel collects it at its next sync: at start-up, then every
+      `tpl_sync_hours` alongside the template sync, and on its own retry timer.
+    * Requires the backend to keep the current set's plaintext (encrypted at
+      rest) until the set is superseded or retired. Firmware that polls this
+      endpoint must not be deployed against a pre-1.3.0 backend, which would
+      rotate the set on every poll.
 
   contact:
     name: Smart Access Control
@@ -239,12 +254,18 @@ paths:
         the panel exposes its own configuration portal. This is not a way
         through the door.
 
-        The firmware grants **only** on `"is_admin": true`. Anything else — a
-        non-200, a missing field, a transport failure — denies, and the flow is
-        refused outright when the backend is unreachable.
+        `is_admin` is `true` only when the slot belongs, through this
+        device's slot assignments, to a member marked as a device
+        administrator who may use this door now: not suspended, approved
+        where the tenant requires approval, and inside any access schedule.
+        It is `false` for everyone else, including an unassigned slot.
 
-        Every call is written to the access log with `method: admin_auth`,
-        granted or not.
+        A credential the backend does not accept is a `401`; a device that is
+        not active, or a suspended tenant, is a `403` (see the shared
+        `Forbidden` response for the codes).
+
+        Every answered call is written to the access log with
+        `method: admin_auth`, granted or not.
       requestBody:
         required: true
         content:
@@ -546,7 +567,7 @@ paths:
                       verified: { type: boolean, const: false }
                       reason:
                         type: string
-                        enum: [otp_mismatch, otp_expired, member_suspended, outside_schedule]
+                        enum: [otp_mismatch, otp_expired, member_suspended, pending_approval, outside_schedule]
                       attempts_left: { type: integer, examples: [2] }
         '429': { $ref: '#/components/responses/RateLimited' }
 
@@ -589,24 +610,35 @@ paths:
     get:
       tags: [Backup codes]
       operationId: fetchBackupCodes
-      summary: Fetch a set of five codes to cache
+      summary: Fetch the device's current set of five codes
       description: |
         **Exactly five codes, exactly six numeric digits each.** The firmware
-        validates both and rejects the whole set otherwise, disabling backup
-        access until it can refetch.
+        validates both and rejects the whole set otherwise. A rejected or failed
+        fetch keeps the set the panel already holds.
 
-        Because only hashes are stored server-side, a set cannot be handed out
-        twice — there is no plaintext left to hand out. Every fetch therefore
-        mints a fresh set and retires the previous one, which also means a
-        panel reboot rotates the codes.
+        **Idempotent since 1.3.0.** Returns the device's current set, the same
+        `set_id`, codes and original `issued_at` on every call, until that set
+        is retired (a code was accepted, reported through
+        `POST /backup-codes/attempts`) or superseded (an administrator rotated
+        it in the portal, or the optional age-based rotation did). A new set is
+        minted only when the device has no current set. The backend therefore
+        keeps the current set's plaintext, encrypted at rest, and discards it
+        once the set is superseded or retired. Only an authenticated, active
+        device receives it.
 
-        If this response is lost in transit, the panel keeps caching codes the
-        backend has already superseded. Those come back as `code_expired`
-        rather than `code_invalid`, which tells an operator to make the device
-        refetch instead of hunting an intruder.
+        The panel calls this when it first comes online after boot, every
+        `tpl_sync_hours` alongside the fingerprint template sync, on a 15-minute
+        retry after a failure, right after a code is accepted, and when the
+        backup screen opens with no set held. Each call marks the set as
+        collected by the device (first and most recent collection), so the
+        portal can show when a rotated set has reached the door.
+
+        A panel offline across a rotation keeps the superseded set until its
+        next successful sync. Those codes come back as `code_expired` rather
+        than `code_invalid`.
       responses:
         '200':
-          description: A fresh set.
+          description: The current set.
           content:
             application/json:
               schema:
@@ -629,6 +661,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /backup-codes/attempts:
     post:
@@ -640,10 +674,20 @@ paths:
         secret are the clearest brute-force signal the system has; crossing the
         threshold raises an alert and emits a realtime event.
 
-        The panel reports what it decided locally in `accepted`; the backend
-        records that and reaches its own conclusion. A disagreement means the
-        panel is running on a stale cache and is surfaced rather than quietly
-        reconciled.
+        The panel reports what it decided locally in `accepted`, and the
+        backend reaches its own conclusion (returned for information; the
+        panel's own decision stands). A disagreement means the panel is running on a
+        set the backend has superseded; it is written to the audit log
+        (`backup_code.decision_mismatch`) rather than quietly reconciled.
+
+        **Logging.** A panel that sends `accepted` must also report the
+        attempt through `POST /access-events` (which it queues while
+        offline); that report is the access-log row, so this call writes
+        none. Without `accepted`, this call writes the row itself.
+
+        **A used code.** A correct code retires its whole set, and nothing
+        more: the next `GET /backup-codes` mints the following set, with reason
+        `after_use`.
       requestBody:
         required: true
         content:
@@ -1337,6 +1381,9 @@ components:
         - no_match
         - not_enrolled
         - member_suspended
+        # Server-side only: the tenant requires approval (manual §9.2) and
+        # this member has not been approved. A panel never sends it.
+        - pending_approval
         - otp_expired
         - otp_mismatch
         - code_invalid
@@ -1449,8 +1496,18 @@ components:
 
     Forbidden:
       description: |
-        The credential is valid but the request is not permitted — a suspended
-        device, a suspended tenant, or a body naming a different device.
+        The credential is valid but the request is not permitted. `code` is
+        one of:
+
+        * `device_provisioned` — added in the dashboard but not activated yet.
+          Every device route answers this until an operator activates it;
+          nothing the panel sends changes it.
+        * `device_suspended` — deactivated by an operator.
+        * `device_retired` — retired.
+        * `tenant_suspended` — the account is suspended.
+        * a body naming a different device than the credential.
+
+        A revoked or expired credential is a 401, not a 403.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }

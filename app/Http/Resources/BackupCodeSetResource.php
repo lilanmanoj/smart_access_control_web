@@ -8,8 +8,12 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
 /**
- * Metadata only. The codes themselves are revealed exactly once, at
- * generation, in the response to the call that created them.
+ * Metadata only. An operator sees the codes exactly once, in the response to
+ * the rotation that created them; the encrypted copy kept for the device's
+ * sync is never serialised here.
+ *
+ * `fetched_at` is when the device first collected the set (null: still
+ * waiting for the door), `last_fetched_at` its most recent collection.
  *
  * @mixin \App\Models\BackupCodeSet
  */
@@ -25,6 +29,7 @@ class BackupCodeSetResource extends JsonResource
             'issued_at' => $this->issued_at->toIso8601String(),
             'superseded_at' => $this->superseded_at?->toIso8601String(),
             'fetched_at' => $this->fetched_at?->toIso8601String(),
+            'last_fetched_at' => $this->last_fetched_at?->toIso8601String(),
             'issued_by' => $this->whenLoaded('issuer', fn (): ?string => $this->issuer?->name),
             'device' => $this->whenLoaded('device', fn (): array => [
                 'id' => $this->device->uuid,

@@ -14,10 +14,10 @@ use Illuminate\Console\Command;
 /**
  * Ages out backup code sets that have been live too long.
  *
- * These codes sit in a panel's RAM in plaintext so the door still opens when
- * the network is down. A short lifetime is one of the few mitigations that
- * choice leaves available, so it is worth actually applying rather than
- * documenting.
+ * Off unless BACKUP_CODE_MAX_AGE_DAYS is set, and 0 is the recommendation:
+ * the door syncs the replacement set, but no operator has seen its codes, so
+ * an age-based rotation leaves people holding codes that no longer work.
+ * Rotating by hand gives the same protection with codes someone can hand out.
  */
 class RotateStaleBackupCodes extends Command
 {
@@ -45,8 +45,9 @@ class RotateStaleBackupCodes extends Command
         foreach ($stale as $set) {
             $tenants->forTenant(
                 $set->device->tenant,
-                // The device is told to refetch; until it does, its cached set
-                // still works, so an offline panel is not locked out by this.
+                // The door collects the new set at its next sync; until then
+                // the set it holds still works, so an offline panel is not
+                // locked out by this.
                 fn () => $backupCodes->rotate($set->device, reason: 'expired')
             );
 
