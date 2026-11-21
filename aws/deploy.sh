@@ -85,18 +85,46 @@ log "starting"
 # ---------------------------------------------------------------------------
 # 4. Verify. The app container runs the migrations on boot, so this waits on
 #    real readiness rather than on the container merely existing.
+#
+#    The probe runs *inside* the app container rather than against
+#    http://127.0.0.1 on the host. Once SITE_ADDRESS is a hostname rather than
+#    ":80", Caddy serves only that hostname and answers a loopback request with
+#    404 — so a host-side probe would fail against a completely healthy stack
+#    and every deploy after the domain cutover would report failure.
 # ---------------------------------------------------------------------------
-log "waiting for /up"
+log "waiting for the application to answer /up"
 for attempt in $(seq 1 60); do
-    if curl -fsS --max-time 5 http://127.0.0.1/up >/dev/null 2>&1; then
-        log "healthy after $((attempt * 5))s"
-        docker image prune -af --filter 'until=72h' >/dev/null 2>&1 || true
-        log "deployed ${SHA}"
-        exit 0
+    if "${COMPOSE[@]}" exec -T app curl -fsS --max-time 5 http://127.0.0.1/up >/dev/null 2>&1; then
+        log "application healthy after $((attempt * 5))s"
+        break
     fi
+
+    if [ "$attempt" -eq 60 ]; then
+        log "FATAL: /up never answered. Recent application output:"
+        "${COMPOSE[@]}" logs --tail 80 app caddy
+        exit 1
+    fi
+
     sleep 5
 done
 
-log "FATAL: /up never answered. Recent application output:"
-"${COMPOSE[@]}" logs --tail 80 app caddy
-exit 1
+# Caddy's side of it. Checked through the public site address, because that is
+# the only name Caddy answers for once one is configured. Advisory only: DNS
+# and certificate issuance can legitimately still be settling right after a
+# cutover, and that is not a reason to fail a deploy whose app is healthy.
+SITE=$(grep -E '^SITE_ADDRESS=' "$APP_DIR/.env" | head -n1 | cut -d= -f2- | tr -d '"' | cut -d, -f1)
+
+if [ -n "$SITE" ] && [ "${SITE#:}" = "$SITE" ]; then
+    if curl -fsS --max-time 10 -H "Host: ${SITE}" http://127.0.0.1/up >/dev/null 2>&1; then
+        log "caddy is serving ${SITE}"
+    else
+        log "NOTE: caddy did not answer for ${SITE} yet — DNS or the certificate may still be settling"
+    fi
+else
+    curl -fsS --max-time 10 http://127.0.0.1/up >/dev/null 2>&1 \
+        && log "caddy is serving on :80" \
+        || log "NOTE: caddy did not answer on :80 yet"
+fi
+
+docker image prune -af --filter 'until=72h' >/dev/null 2>&1 || true
+log "deployed ${SHA}"
