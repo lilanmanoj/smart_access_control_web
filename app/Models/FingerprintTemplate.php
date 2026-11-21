@@ -17,10 +17,10 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 /**
  * The backend's copy of a template a panel read back out of its sensor.
  *
- * Biometric data. It is encrypted at rest with the application key, hidden
- * from every serialisation, and no endpoint returns it — only server code can
- * decrypt it. The future sync will push `active` templates back to panels;
- * nothing does yet.
+ * Biometric data. It is encrypted at rest with the application key and hidden
+ * from every serialisation. Exactly one endpoint returns it: the device-only
+ * template sync (`GET /fingerprint-templates`), which pushes `active`
+ * templates back to panels and decrypts only the page it is returning.
  */
 #[Fillable([
     'tenant_id', 'member_id', 'enrollment_id', 'device_id', 'fingerprint_slot',

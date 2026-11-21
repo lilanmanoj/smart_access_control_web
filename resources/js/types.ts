@@ -69,7 +69,44 @@ export interface Device {
     active_backup_code_set?: BackupCodeSet | null;
     pending_commands?: DeviceCommand[];
     credentials?: DeviceCredential[];
+    /** Template sync (device API 1.2.0). */
+    template_sync?: TemplateSync;
     created_at: string | null;
+}
+
+export type TemplateSyncStatus = 'completed' | 'partial' | 'aborted';
+
+/** What a panel reported doing with the last template set it fetched. */
+export interface TemplateSyncReport {
+    id: string;
+    status: TemplateSyncStatus;
+    abort_reason: string | null;
+    revision: string | null;
+    received_at: string | null;
+    written: number | null;
+    unchanged: number | null;
+    deleted: number | null;
+    retained: number | null;
+    missing: number | null;
+    failed: number;
+    duration_ms: number | null;
+    errors: { slot: number; error: string }[];
+    /** Null when the report could not be compared (aborted, or no slot list). */
+    drift: { missing_slots: number[]; unknown_slots: number[] } | null;
+}
+
+export interface TemplateSync {
+    revision: string | null;
+    /** Entries in the last set served; null if the panel has never synced. */
+    total: number | null;
+    /** More members qualified than the sensor holds; some were left off. */
+    truncated: boolean;
+    /** Members waiting for a released slot to be confirmed empty. */
+    deferred: number;
+    served_at: string | null;
+    active_slots?: number;
+    releasing_slots?: number;
+    last_report?: TemplateSyncReport | null;
 }
 
 export interface DeviceCredential {

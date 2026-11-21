@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Smart Access Control — Device API
-  version: 1.1.0
+  version: 1.2.0
   summary: The contract between an ESP32-S3 access panel and the backend.
   description: |
     Every path here is appended directly to the device's configured
@@ -24,8 +24,10 @@ info:
     * **Fingerprint templates live in the sensor's own flash.** Slot ids are
       device-local integers `0 … capacity-1` and survive reboots and reflashes.
       The backend records who owns a slot. Since 1.1.0 it also receives a copy
-      of each template at enrolment, but nothing in this contract writes one
-      back to a panel yet.
+      of each template at enrolment, and since 1.2.0 it pushes templates back
+      (`GET /fingerprint-templates`), so slot numbers are assigned **per
+      device** — the same member may sit in slot 7 on one panel and slot 2 on
+      another.
     * **The device must keep working while offline.** Events are queued in
       flash and flushed on reconnect, so this API accepts batched, replayed
       submissions with an idempotency key.
@@ -57,6 +59,21 @@ info:
       retries once **without** it — so a backend that rejects the template can
       never cost a member their enrolment.
 
+    ### Additions in 1.2.0 (backwards compatible)
+
+    * `GET /fingerprint-templates` — **template sync.** The authoritative, paged
+      list of templates this panel's sensor should hold, one entry per slot,
+      capped at the panel's capacity. The panel calls it on every start-up
+      (once WiFi is up and `/health` passes) and then every `tpl_sync_hours`
+      (a panel setting, default 3). It writes what it is missing, leaves
+      identical templates alone, and **deletes every slot the response does not
+      list**. Removing a member from a door therefore means: stop listing them.
+    * `POST /fingerprint-template-syncs` — the panel's report of what a sync
+      actually did, including the slots present on the sensor afterwards.
+    * Slot numbers become per-device assignments the backend owns (see the
+      sync endpoint). Every lookup of `(device, fingerprint_slot) → member` —
+      access events, `/authentications`, enrolments — must go through them.
+
   contact:
     name: Smart Access Control
   license:
@@ -86,6 +103,8 @@ tags:
     description: The method that keeps working when the network does not.
   - name: Commands
     description: Backend-to-device operations.
+  - name: Templates
+    description: Fingerprint template sync — the backend pushes templates to panels.
 
 paths:
   # ==========================================================================
@@ -289,6 +308,14 @@ paths:
 
         **Naming:** the firmware currently calls the returned id `user_id`.
         Here it is `member_id` — `user` means a dashboard operator.
+
+        **Slot assignment (1.2.0):** the slot is the panel's own choice — it
+        always enrols into a slot that is empty on its sensor — so it is
+        authoritative. Record it as this member's slot assignment on this
+        device. If the backend had already assigned that slot on this device to
+        a different member whose template the panel has not received yet,
+        move that member to another free slot and change the device's sync
+        revision.
       requestBody:
         required: true
         content:
@@ -782,6 +809,267 @@ paths:
                       otp_ttl_seconds: { type: integer }
                       backup_codes_online_only: { type: boolean }
 
+  # ==========================================================================
+  /fingerprint-templates:
+    get:
+      tags: [Templates]
+      operationId: listFingerprintTemplates
+      summary: The template set this panel should hold (template sync)
+      description: |
+        Returns the **complete, authoritative** list of what this panel's
+        sensor should hold: one entry per slot, ascending by slot, never more
+        than `capacity` entries in total. Paged with `offset` / `limit`.
+
+        **When the panel calls it:** on every start-up, as soon as WiFi is up
+        and `/health` passes, and then every `tpl_sync_hours` (a panel
+        setting, whole hours 1–168, default 3). A failed sync is retried after
+        15 minutes. The panel's screen is blocked while a sync runs, so answer
+        quickly.
+
+        **What the panel does with the answer:**
+
+        1. For each entry with a `template`: if the sensor slot already holds
+           bytes with the same `sha256`, nothing; otherwise it downloads the
+           template into that slot (replacing whatever was there) and reads it
+           back to verify the hash.
+        2. For each entry with `template: null`: nothing. The slot belongs to a
+           member, but the backend has no template bytes for it (enrolled with
+           pre-1.1 firmware, or the template was rejected). The panel keeps
+           whatever its sensor has there and never deletes it.
+        3. **Deletes every occupied slot that no entry lists.** It does this
+           only after every page arrived, the `revision` stayed the same on
+           every page, and every entry was attempted. A broken or partial
+           response never deletes anything.
+        4. Reports the outcome to `POST /fingerprint-template-syncs`.
+
+        **What to list:** only `active` templates (not `superseded` or
+        `deleted`) that belong to a member, are of the requested
+        `template_format`, and whose member may use this device. Members whose
+        enrolment on **this** device has no stored template go in as
+        `template: null`. Anything not listed is deleted from the panel.
+
+        **Slots are per device.** For a member enrolled on this panel, the slot
+        is the one it enrolled into. For a member enrolled elsewhere, the
+        backend assigns a free slot on this device and keeps that assignment
+        stable across syncs. Never move an existing assignment to another slot
+        without a reason, because every move costs the panel a delete and a
+        write.
+
+        **Never reuse a slot on the same device for a different member until
+        the panel has confirmed it empty.** After the backend stops listing
+        member A in slot 5, the panel still holds A's finger in slot 5 until
+        its next sync. If slot 5 were handed to member B straight away, A's
+        finger would be logged as B. A slot becomes reusable only once a sync
+        report from that device has `status: completed` or `partial` and its
+        `slots_present` does not contain the slot.
+
+        **Revision:** an opaque string that changes whenever anything in this
+        device's set changes (an entry added or removed, a slot, member, or
+        template sha256 changed, or the capacity or format changed), and is
+        identical whenever the set is identical. A hash of the sorted entries
+        works well. When `since_revision` equals the current revision, answer
+        `unchanged: true` with an empty `templates` array, so a reboot with
+        nothing new costs one tiny request.
+
+        **Over capacity:** if more templates qualify than `capacity`, list
+        members enrolled on this device first, then the others in a stable
+        order of the backend's choosing. Set `truncated: true` and surface it
+        on the dashboard.
+
+        **Size:** each template is about 0.9 KB of JSON. The panel has no
+        PSRAM and parses one page into a 14 KB buffer, so `limit` is capped
+        at 10.
+
+        **Security:** this is the only endpoint that returns template bytes.
+        Device credentials only (never a dashboard session); only the
+        authenticated device's tenant; `Cache-Control: no-store`; never log
+        `data`. Write one audit entry per sync that served templates.
+      parameters:
+        - name: device_id
+          in: query
+          required: true
+          description: Must equal the authenticated device (`X-Device-Id`); a mismatch is a 403.
+          schema: { $ref: '#/components/schemas/DeviceIdClaim' }
+        - name: capacity
+          in: query
+          required: true
+          description: |
+            How many templates the panel's sensor can hold (slots
+            `0 … capacity-1`). `total` must never exceed it and no `slot` may be
+            `>= capacity`. The panel aborts the sync, deleting nothing, if
+            either happens.
+          schema: { type: integer, minimum: 1, maximum: 1024, examples: [300] }
+        - name: template_format
+          in: query
+          required: true
+          description: Only templates of this format are listed. Unknown format → 422.
+          schema: { type: string, enum: [as608] }
+        - name: offset
+          in: query
+          required: false
+          description: Entries to skip, in slot order. The panel walks the pages `0, limit, 2·limit, …`.
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: limit
+          in: query
+          required: false
+          description: Page size. The panel sends 8.
+          schema: { type: integer, minimum: 1, maximum: 10, default: 8 }
+        - name: since_revision
+          in: query
+          required: false
+          description: |
+            The revision the panel last applied completely. The panel omits it
+            after a failed or partial sync, or when its sensor's template count
+            or capacity no longer matches what it had after that sync (for
+            example, a wiped or replaced sensor).
+          schema: { type: string, pattern: '^[A-Za-z0-9._-]{1,64}$' }
+        - { $ref: '#/components/parameters/EnrolledCount' }
+        - { $ref: '#/components/parameters/FirmwareVersion' }
+      responses:
+        '200':
+          description: One page of this device's template set.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemplateManifestPage' }
+              examples:
+                firstPage:
+                  summary: Three templates for this panel; one with no stored template
+                  description: |
+                    `data` is the same 512 synthetic bytes as the enrolment
+                    fixture (not a real fingerprint); its `sha256` is correct.
+                  value:
+                    revision: 9f2c41d07a3be815
+                    unchanged: false
+                    total: 3
+                    offset: 0
+                    limit: 8
+                    truncated: false
+                    templates:
+                      - slot: 0
+                        member_id: 3f0c6a52-8a7e-4f3b-9a51-2f1d7c0e9b11
+                        template:
+                          format: as608
+                          encoding: base64
+                          size: 512
+                          sha256: 1c7fb1b3a4be3a63e8e9a81e871ff1a1e40c237f773a905bb5f5cd91e604a87f
+                          data: cHtQC745+ZkdHZBKal34jgOajekuHEcWCmm56bjUgm5VAhJOIEoHQ5PWSCYtZ/nwzKPeN8nmCZlmwCLahBjhflWxEXKQbAhkouKGCfRZiaIXhJjRzlhX+HY0qZ14kUyuXfF6Klwqp2Qm+OAUGQfoeux0raospT7DFXDuS8N5oDvEG7uJTukic/csxeneGKDqBFym3dvp7x13ViqXv+XMCdioswF8p5BWcLHCxZ3AFrXzfvyln2eB51acgW9S0zO4rlYV7I0FDMFQegRvFH9MRRRwQVpnBSBpetkvflKb0eaUY//hE/0HjpO9MNtJAecP/5COM+1lvrIRwmNnlIY05Bsssy/XDTrohQs3ND8n3pp95pcoKpKVbHs7DKwelupdjn4t/QtCRinNmST0Dzi4yvrHjVTA8Bt++NKvQlHKHnCHZq64smZavRKueNYbHvu/D7ggpK1HlmPCkRg24l7EM6EkRSDoLvMoU2jeiO+wRqNt2b1L0wHaPYL+cj81rwnCBxIlLz139rlMhjYoPY3NHyoBPYxjszer/f8YtpcMvDw/ocaTjTGKWwzun1d12X6RTXB0faCCtic2YMZNmX7bFHKzZU+tnw8DGK4Ha7ChU5diQdu/99/YYMHf4KFplKm2KVicXkgRf2qhTxlS2u56hl9BQQqftv7rvs+CaE7aAWY=
+                      - slot: 3
+                        member_id: 5b7e2d19-0c4f-4a8e-b6d3-9e1f2a7c4d58
+                        template: null
+                      - slot: 7
+                        member_id: 8a1d4f6c-2b3e-4c7a-9f05-1d6e8b2a3c94
+                        template:
+                          format: as608
+                          encoding: base64
+                          size: 512
+                          sha256: 1c7fb1b3a4be3a63e8e9a81e871ff1a1e40c237f773a905bb5f5cd91e604a87f
+                          data: cHtQC745+ZkdHZBKal34jgOajekuHEcWCmm56bjUgm5VAhJOIEoHQ5PWSCYtZ/nwzKPeN8nmCZlmwCLahBjhflWxEXKQbAhkouKGCfRZiaIXhJjRzlhX+HY0qZ14kUyuXfF6Klwqp2Qm+OAUGQfoeux0raospT7DFXDuS8N5oDvEG7uJTukic/csxeneGKDqBFym3dvp7x13ViqXv+XMCdioswF8p5BWcLHCxZ3AFrXzfvyln2eB51acgW9S0zO4rlYV7I0FDMFQegRvFH9MRRRwQVpnBSBpetkvflKb0eaUY//hE/0HjpO9MNtJAecP/5COM+1lvrIRwmNnlIY05Bsssy/XDTrohQs3ND8n3pp95pcoKpKVbHs7DKwelupdjn4t/QtCRinNmST0Dzi4yvrHjVTA8Bt++NKvQlHKHnCHZq64smZavRKueNYbHvu/D7ggpK1HlmPCkRg24l7EM6EkRSDoLvMoU2jeiO+wRqNt2b1L0wHaPYL+cj81rwnCBxIlLz139rlMhjYoPY3NHyoBPYxjszer/f8YtpcMvDw/ocaTjTGKWwzun1d12X6RTXB0faCCtic2YMZNmX7bFHKzZU+tnw8DGK4Ha7ChU5diQdu/99/YYMHf4KFplKm2KVicXkgRf2qhTxlS2u56hl9BQQqftv7rvs+CaE7aAWY=
+                unchanged:
+                  summary: since_revision matched — nothing to do
+                  value:
+                    revision: 9f2c41d07a3be815
+                    unchanged: true
+                    total: 3
+                    offset: 0
+                    limit: 8
+                    truncated: false
+                    templates: []
+                empty:
+                  summary: Nobody may use this panel — it deletes every template
+                  value:
+                    revision: e3b0c44298fc1c14
+                    unchanged: false
+                    total: 0
+                    offset: 0
+                    limit: 8
+                    truncated: false
+                    templates: []
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /fingerprint-template-syncs:
+    post:
+      tags: [Templates]
+      operationId: reportTemplateSync
+      summary: Report what a template sync actually did
+      description: |
+        Sent after every sync that got past the first page, except one that
+        `GET /fingerprint-templates` answered with `unchanged: true`.
+
+        * `completed`: every entry applied, unlisted slots deleted.
+        * `partial`: the sync ran to the end, but some entries or deletions
+          failed (`errors`).
+        * `aborted`: stopped early (`abort_reason`). Templates written before
+          the stop are on the sensor, but **nothing was deleted**.
+
+        `slots_present` is the sensor's real occupancy after the sync. It is
+        present on `completed` / `partial` reports when the panel could read
+        it. It is the ground truth the backend uses to confirm a slot is
+        empty before reusing it (see `GET /fingerprint-templates`), and to
+        flag drift on the dashboard.
+
+        Idempotent from the backend's view: store every report. The panel does
+        not retry a failed report.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TemplateSyncReport' }
+            examples:
+              completed:
+                value:
+                  device_id: SMA_4821
+                  revision: 9f2c41d07a3be815
+                  status: completed
+                  template_format: as608
+                  capacity: 300
+                  enrolled_count: 3
+                  written: 1
+                  unchanged: 1
+                  deleted: 2
+                  retained: 1
+                  missing: 0
+                  failed: 0
+                  duration_ms: 1840
+                  firmware_version: 1.0.0
+                  errors: []
+                  slots_present: [0, 3, 7]
+              aborted:
+                value:
+                  device_id: SMA_4821
+                  revision: 9f2c41d07a3be815
+                  status: aborted
+                  abort_reason: revision_changed
+                  template_format: as608
+                  capacity: 300
+                  enrolled_count: 4
+                  written: 1
+                  unchanged: 0
+                  deleted: 0
+                  retained: 0
+                  missing: 0
+                  failed: 0
+                  duration_ms: 950
+                  firmware_version: 1.0.0
+                  errors: []
+      responses:
+        '201':
+          description: Recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted: { type: boolean, const: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
 # ============================================================================
 components:
   securitySchemes:
@@ -859,6 +1147,11 @@ components:
         4. lowercase hex SHA-256 of the **decoded bytes** equals `sha256` → else `sha256_mismatch`
 
         `fingerprint_slot` (the sibling field) says which sensor slot holds it.
+
+        The same object comes back to panels in `GET /fingerprint-templates`,
+        byte-for-byte as stored: same `data`, same `sha256`. The panel applies
+        the same checks before it writes a template, and skips (and reports)
+        any entry that fails them.
       required: [format, encoding, size, sha256, data]
       properties:
         format:
@@ -895,6 +1188,123 @@ components:
         `rejected` — sent but discarded (see `template_error`).
         The panel only logs this; it never changes the enrolment outcome.
       enum: [stored, absent, rejected]
+
+    TemplateManifestEntry:
+      type: object
+      description: One slot on this panel and what it must hold.
+      required: [slot, member_id, template]
+      properties:
+        slot:
+          type: integer
+          minimum: 0
+          description: Device-local slot, `< capacity`. Unique within the set.
+          examples: [7]
+        member_id: { type: string, format: uuid }
+        template:
+          description: |
+            The template to hold in `slot`, or `null` to keep whatever the
+            panel already has there (the backend holds no bytes for this
+            member's enrolment on this device).
+          oneOf:
+            - { $ref: '#/components/schemas/FingerprintTemplate' }
+            - { type: 'null' }
+
+    TemplateManifestPage:
+      type: object
+      required: [revision, unchanged, total, offset, limit, truncated, templates]
+      properties:
+        revision:
+          type: string
+          pattern: '^[A-Za-z0-9._-]{1,64}$'
+          description: Identifies the whole set (all pages). Must be the same on every page of one sync.
+          examples: [9f2c41d07a3be815]
+        unchanged:
+          type: boolean
+          description: True only when the request's `since_revision` equals `revision`. `templates` is then empty.
+        total:
+          type: integer
+          minimum: 0
+          description: Entries in the whole set, `<= capacity`.
+        offset: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1, maximum: 10 }
+        truncated:
+          type: boolean
+          description: More templates qualified than `capacity` allows; the set was cut to fit.
+        templates:
+          type: array
+          maxItems: 10
+          description: This page's entries, ascending by `slot`.
+          items: { $ref: '#/components/schemas/TemplateManifestEntry' }
+        server_time: { type: string, format: date-time }
+
+    TemplateSyncError:
+      type: string
+      description: |
+        Why one entry or deletion could not be applied.
+        Entry checks: `invalid_slot` (missing, negative or `>= capacity`;
+        reported with slot 65535 when absent), `duplicate_slot`,
+        `unsupported_format`, `invalid_encoding`, `size_mismatch`,
+        `sha256_mismatch`.
+        Sensor: `sensor_not_ready`, `sensor_error` (stopped answering — the
+        sync aborts), `download_rejected`, `store_failed`, `verify_failed` (the
+        read-back after writing did not hash to `sha256`).
+      enum:
+        - invalid_slot
+        - duplicate_slot
+        - unsupported_format
+        - invalid_encoding
+        - size_mismatch
+        - sha256_mismatch
+        - sensor_not_ready
+        - sensor_error
+        - download_rejected
+        - store_failed
+        - verify_failed
+
+    TemplateSyncReport:
+      type: object
+      required: [revision, status, capacity, written, unchanged, deleted, failed]
+      properties:
+        device_id: { $ref: '#/components/schemas/DeviceIdClaim' }
+        revision:
+          type: string
+          description: The revision the sync was applying (from its first page).
+        status: { type: string, enum: [completed, partial, aborted] }
+        abort_reason:
+          type: string
+          description: Present only when `status` is `aborted`.
+          enum: [http_error, invalid_response, capacity_exceeded, revision_changed, sensor_error, out_of_memory]
+        template_format: { type: string, enum: [as608] }
+        capacity: { type: integer, minimum: 1 }
+        enrolled_count:
+          type: integer
+          minimum: 0
+          description: Templates on the sensor after the sync.
+        written: { type: integer, minimum: 0, description: Templates downloaded into the sensor. }
+        unchanged: { type: integer, minimum: 0, description: Entries already present with identical bytes. }
+        deleted: { type: integer, minimum: 0, description: Unlisted slots removed. }
+        retained: { type: integer, minimum: 0, description: 'Entries with `template: null`, left as they were.' }
+        missing:
+          type: integer
+          minimum: 0
+          description: 'Of the retained entries, how many slots were empty on the sensor (the member cannot use this door until re-enrolled).'
+        failed: { type: integer, minimum: 0 }
+        duration_ms: { type: integer, minimum: 0 }
+        firmware_version: { type: string, maxLength: 32 }
+        errors:
+          type: array
+          maxItems: 16
+          description: The first 16 failures. `failed` has the full count.
+          items:
+            type: object
+            required: [slot, error]
+            properties:
+              slot: { type: integer, minimum: 0, maximum: 65535 }
+              error: { $ref: '#/components/schemas/TemplateSyncError' }
+        slots_present:
+          type: array
+          description: Occupied sensor slots after the sync. Absent on `aborted`, or when the panel could not read them.
+          items: { type: integer, minimum: 0 }
 
     DeviceIdentity:
       type: object
