@@ -6,7 +6,6 @@ namespace App\Models;
 
 use App\Enums\BackupCodeSetStatus;
 use App\Enums\DeviceStatus;
-use App\Enums\EnrollmentStatus;
 use App\Models\Concerns\BelongsToTenant;
 use App\Models\Concerns\HasUuid;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
@@ -42,6 +41,10 @@ class Device extends Model
             'is_online' => 'boolean',
             'last_seen_at' => 'datetime',
             'last_health_at' => 'datetime',
+            'template_set_truncated' => 'boolean',
+            'template_set_deferred' => 'integer',
+            'template_set_total' => 'integer',
+            'template_set_served_at' => 'datetime',
         ];
     }
 
@@ -89,6 +92,24 @@ class Device extends Model
         return $this->hasMany(DeviceHealthReport::class);
     }
 
+    /** @return HasMany<DeviceTemplateSlot, $this> */
+    public function templateSlots(): HasMany
+    {
+        return $this->hasMany(DeviceTemplateSlot::class);
+    }
+
+    /** @return HasMany<TemplateSyncReport, $this> */
+    public function templateSyncReports(): HasMany
+    {
+        return $this->hasMany(TemplateSyncReport::class);
+    }
+
+    /** @return HasOne<TemplateSyncReport, $this> */
+    public function latestTemplateSyncReport(): HasOne
+    {
+        return $this->hasOne(TemplateSyncReport::class)->latestOfMany();
+    }
+
     /** @return HasMany<OtpRequest, $this> */
     public function otpRequests(): HasMany
     {
@@ -110,18 +131,12 @@ class Device extends Model
     }
 
     /**
-     * The lowest slot id not currently claimed by an active enrolment.
-     * Returns null when the sensor is full.
+     * The lowest slot id no member holds on this panel — enrolled here, pushed
+     * here, or still releasing. Returns null when the sensor is full.
      */
     public function nextAvailableSlot(): ?int
     {
-        $taken = $this->enrollments()
-            ->whereIn('status', [EnrollmentStatus::Pending->value, EnrollmentStatus::Active->value])
-            ->whereNotNull('fingerprint_slot')
-            ->pluck('fingerprint_slot')
-            ->all();
-
-        $taken = array_flip($taken);
+        $taken = array_flip($this->templateSlots()->pluck('slot')->all());
 
         for ($slot = 0; $slot < $this->template_capacity; $slot++) {
             if (! isset($taken[$slot])) {

@@ -113,6 +113,7 @@ class AppServiceProvider extends ServiceProvider
             'device-otp-verifications' => 'otp_verifications',
             'device-backup-codes' => 'backup_code_attempts',
             'device-access-events' => 'access_events',
+            'device-template-sync' => 'template_sync',
         ];
 
         foreach ($limits as $name => $configKey) {

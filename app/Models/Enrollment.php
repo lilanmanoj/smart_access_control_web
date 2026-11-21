@@ -7,6 +7,7 @@ namespace App\Models;
 use App\Enums\EnrollmentStatus;
 use App\Models\Concerns\BelongsToTenant;
 use App\Models\Concerns\HasUuid;
+use App\Services\TemplateSlotService;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -22,6 +23,20 @@ class Enrollment extends Model
     use BelongsToTenant;
     use HasFactory;
     use HasUuid;
+
+    protected static function booted(): void
+    {
+        // An enrolment that holds a slot always owns that slot in the
+        // per-device assignments, and one that stops holding it releases it.
+        // Kept here rather than at each call site so factories, seeders and
+        // every service path stay consistent with what panels are sent.
+        static::saved(function (Enrollment $enrollment): void {
+            if ($enrollment->wasRecentlyCreated
+                || $enrollment->wasChanged(['status', 'fingerprint_slot', 'member_id', 'device_id'])) {
+                app(TemplateSlotService::class)->syncEnrollment($enrollment);
+            }
+        });
+    }
 
     protected function casts(): array
     {

@@ -38,6 +38,25 @@ class DeviceResource extends JsonResource
             'active_backup_code_set' => new BackupCodeSetResource($this->whenLoaded('activeBackupCodeSet')),
             'pending_commands' => DeviceCommandResource::collection($this->whenLoaded('commands')),
             'credentials' => DeviceCredentialResource::collection($this->whenLoaded('credentials')),
+            // Template sync (device API 1.2.0): the last set served to this
+            // panel, and what the panel said it did with it.
+            'template_sync' => [
+                'revision' => $this->template_set_revision,
+                'total' => $this->template_set_total,
+                // More members qualified than the sensor holds; some were cut.
+                'truncated' => (bool) $this->template_set_truncated,
+                // Waiting for a released slot to be confirmed empty.
+                'deferred' => (int) $this->template_set_deferred,
+                'served_at' => $this->template_set_served_at?->toIso8601String(),
+                'active_slots' => $this->whenCounted('activeTemplateSlots'),
+                'releasing_slots' => $this->whenCounted('releasingTemplateSlots'),
+                'last_report' => $this->whenLoaded(
+                    'latestTemplateSyncReport',
+                    fn () => $this->latestTemplateSyncReport === null
+                        ? null
+                        : new TemplateSyncReportResource($this->latestTemplateSyncReport),
+                ),
+            ],
             'created_at' => $this->created_at?->toIso8601String(),
         ];
     }

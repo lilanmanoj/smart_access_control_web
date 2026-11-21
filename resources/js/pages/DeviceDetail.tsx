@@ -8,6 +8,7 @@ import {
     CommandStatusBadge,
     DeviceStateBadge,
     EnrollmentStatusBadge,
+    TemplateSyncBadge,
 } from '@/components/status';
 import {
     Badge,
@@ -20,7 +21,7 @@ import {
     Td,
     Th,
 } from '@/components/ui';
-import type { Device, Enrollment, Paginated } from '@/types';
+import type { Device, Enrollment, Paginated, TemplateSync } from '@/types';
 
 /**
  * One door: its state, who is enrolled on it, what is queued for it, and the
@@ -294,6 +295,10 @@ export function DeviceDetailPage() {
                 </Panel>
             </div>
 
+            {device.template_sync && (
+                <TemplateSyncPanel sync={device.template_sync} capacity={device.template_capacity} />
+            )}
+
             {/* ------------------------------------------------------------ */}
             {/* Credentials                                                   */}
             {/* ------------------------------------------------------------ */}
@@ -428,7 +433,7 @@ export function DeviceDetailPage() {
                                                             onClick={() => {
                                                                 if (
                                                                     window.confirm(
-                                                                        'Revoke this enrolment? The template erase is queued and takes effect when the device next polls — until then the finger still opens the door.',
+                                                                        'Revoke this enrolment? The panel deletes the template at its next template sync — until then the finger still opens the door.',
                                                                     )
                                                                 ) {
                                                                     revoke.mutate(enrollment.id);
@@ -448,6 +453,110 @@ export function DeviceDetailPage() {
                 </Panel>
             )}
         </div>
+    );
+}
+
+/**
+ * The panel mirrors the template set it is sent, deleting anything unlisted.
+ * This is where an operator sees whether that is working: the last report,
+ * what failed, where the sensor and the backend disagree, and whether the set
+ * had to be cut to fit the sensor.
+ */
+function TemplateSyncPanel({ sync, capacity }: { sync: TemplateSync; capacity: number }) {
+    const report = sync.last_report ?? null;
+    const drift = report?.drift ?? null;
+    const hasDrift = drift !== null && (drift.missing_slots.length > 0 || drift.unknown_slots.length > 0);
+
+    return (
+        <Panel
+            title="Template sync"
+            description="The panel holds exactly the templates it is sent, and deletes any slot not listed"
+            className="p-4"
+        >
+            <div className="flex flex-col gap-3 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                    <TemplateSyncBadge status={report?.status ?? null} />
+                    {sync.truncated && (
+                        <Badge tone="warn" glyph="!">
+                            Over capacity — some members left off
+                        </Badge>
+                    )}
+                    {sync.deferred > 0 && (
+                        <Badge tone="warn" glyph="◔">
+                            {sync.deferred} waiting for a free slot
+                        </Badge>
+                    )}
+                    {hasDrift && (
+                        <Badge tone="danger" glyph="≠">
+                            Sensor and backend disagree
+                        </Badge>
+                    )}
+                </div>
+
+                <dl className="grid gap-2 sm:grid-cols-2">
+                    <Row label="Last report" value={formatRelative(report?.received_at ?? null)} />
+                    <Row label="Last set served" value={formatRelative(sync.served_at)} />
+                    <Row
+                        label="Templates in set"
+                        value={sync.total === null ? 'Never synced' : `${sync.total} of ${capacity}`}
+                    />
+                    <Row
+                        label="Slots awaiting deletion"
+                        value={sync.releasing_slots === undefined ? '—' : String(sync.releasing_slots)}
+                    />
+                    {report && (
+                        <>
+                            <Row
+                                label="Written · unchanged · deleted"
+                                value={`${report.written ?? 0} · ${report.unchanged ?? 0} · ${report.deleted ?? 0}`}
+                            />
+                            <Row label="Failed" value={String(report.failed)} />
+                        </>
+                    )}
+                    {report?.abort_reason && <Row label="Aborted because" value={humanise(report.abort_reason)} />}
+                </dl>
+
+                {report && report.errors.length > 0 && (
+                    <div>
+                        <h3 className="mb-1 font-medium">Failures</h3>
+                        <ul className="flex flex-wrap gap-1.5">
+                            {report.errors.map((error, index) => (
+                                <li key={`${error.slot}-${index}`}>
+                                    <Badge tone="danger" glyph="✕">
+                                        Slot {error.slot === 65535 ? '?' : error.slot}: {humanise(error.error)}
+                                    </Badge>
+                                </li>
+                            ))}
+                        </ul>
+                        {report.failed > report.errors.length && (
+                            <p className="mt-1" style={{ color: 'var(--text-muted)' }}>
+                                …and {report.failed - report.errors.length} more.
+                            </p>
+                        )}
+                    </div>
+                )}
+
+                {hasDrift && drift && (
+                    <dl className="flex flex-col gap-1">
+                        {drift.missing_slots.length > 0 && (
+                            <Row
+                                label="Should hold a template, but empty"
+                                value={drift.missing_slots.join(', ')}
+                            />
+                        )}
+                        {drift.unknown_slots.length > 0 && (
+                            <Row
+                                label="Occupied, but nobody owns it here"
+                                value={drift.unknown_slots.join(', ')}
+                            />
+                        )}
+                        <p style={{ color: 'var(--text-muted)' }}>
+                            Not corrected automatically — the next sync tries again.
+                        </p>
+                    </dl>
+                )}
+            </div>
+        </Panel>
     );
 }
 

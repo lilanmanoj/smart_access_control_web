@@ -1,5 +1,12 @@
 import { Badge } from './ui';
-import type { AccessResult, Device, DeviceStatus, EnrollmentStatus, MemberStatus } from '@/types';
+import type {
+    AccessResult,
+    Device,
+    DeviceStatus,
+    EnrollmentStatus,
+    MemberStatus,
+    TemplateSyncStatus,
+} from '@/types';
 
 /**
  * Status rendering, in one place.
@@ -155,6 +162,41 @@ export function CommandStatusBadge({ status }: { status: string }) {
             return (
                 <Badge tone="neutral" glyph="—">
                     Expired
+                </Badge>
+            );
+    }
+}
+
+/**
+ * The outcome a panel reported for its last template sync. `null` is a panel
+ * that has never reported one — older firmware, or not yet booted on 1.2.
+ */
+export function TemplateSyncBadge({ status }: { status: TemplateSyncStatus | null }) {
+    switch (status) {
+        case 'completed':
+            return (
+                <Badge tone="ok" glyph="✓">
+                    Completed
+                </Badge>
+            );
+        case 'partial':
+            // Ran to the end but some slots failed: the door works for most.
+            return (
+                <Badge tone="warn" glyph="◑">
+                    Partial
+                </Badge>
+            );
+        case 'aborted':
+            // Nothing was deleted, so the panel is on its previous set.
+            return (
+                <Badge tone="danger" glyph="✕">
+                    Aborted
+                </Badge>
+            );
+        default:
+            return (
+                <Badge tone="neutral" glyph="—">
+                    Never synced
                 </Badge>
             );
     }

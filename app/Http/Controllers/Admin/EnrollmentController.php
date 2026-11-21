@@ -71,7 +71,7 @@ class EnrollmentController extends Controller
             'enrollment' => new EnrollmentResource($enrollment->fresh(['device', 'member'])),
             'note' => $slot === null
                 ? 'Revoked.'
-                : 'Revoked. The template erase is queued and takes effect when the device next polls.',
+                : 'Revoked. The panel deletes the template at its next template sync.',
         ]);
     }
 }

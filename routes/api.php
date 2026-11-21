@@ -8,6 +8,8 @@ use App\Http\Controllers\Api\V1\BackupCodeController;
 use App\Http\Controllers\Api\V1\DeviceCommandController;
 use App\Http\Controllers\Api\V1\DeviceRegistrationController;
 use App\Http\Controllers\Api\V1\EnrollmentController;
+use App\Http\Controllers\Api\V1\FingerprintTemplateController;
+use App\Http\Controllers\Api\V1\FingerprintTemplateSyncController;
 use App\Http\Controllers\Api\V1\HealthController;
 use App\Http\Controllers\Api\V1\OtpController;
 use App\Http\Controllers\Api\V1\OtpDeliveryController;
@@ -51,6 +53,16 @@ Route::prefix('v1')
             ->name('device.enrollments.store');
         Route::patch('/enrollments/{member}', [EnrollmentController::class, 'update'])
             ->name('device.enrollments.update');
+
+        // Template sync (1.2.0): the set this panel's sensor should hold, and
+        // the panel's report of what it did. The only route that returns
+        // template bytes.
+        Route::get('/fingerprint-templates', [FingerprintTemplateController::class, 'index'])
+            ->middleware('throttle:device-template-sync')
+            ->name('device.fingerprint-templates.index');
+        Route::post('/fingerprint-template-syncs', [FingerprintTemplateSyncController::class, 'store'])
+            ->middleware('throttle:device-template-sync')
+            ->name('device.fingerprint-template-syncs.store');
 
         // One-time passwords. Issuance never returns the code (§7.3).
         Route::post('/otp-requests', [OtpController::class, 'store'])

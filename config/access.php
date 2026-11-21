@@ -181,6 +181,9 @@ return [
         'backup_code_attempts' => (int) env('RATE_LIMIT_BACKUP_ATTEMPTS', 10),
         'access_events' => (int) env('RATE_LIMIT_ACCESS_EVENTS', 120),
         'health' => (int) env('RATE_LIMIT_HEALTH', 30),
+        // Shared by the template-sync page fetches and its report. A full
+        // 1024-slot sensor at the panel's page size of 8 is 128 pages.
+        'template_sync' => (int) env('RATE_LIMIT_TEMPLATE_SYNC', 180),
         'default' => (int) env('RATE_LIMIT_DEVICE_DEFAULT', 60),
     ],
 
