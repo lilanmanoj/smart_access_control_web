@@ -13,6 +13,7 @@ import { MemberDetailPage } from '@/pages/MemberDetail';
 import { AccessEventsPage } from '@/pages/AccessEvents';
 import { BackupCodesPage } from '@/pages/BackupCodes';
 import { SchedulesPage } from '@/pages/Schedules';
+import { TenantsPage } from '@/pages/Tenants';
 import { UsersPage } from '@/pages/Users';
 import { WebhooksPage } from '@/pages/Webhooks';
 import { AuditLogPage } from '@/pages/AuditLog';
@@ -57,6 +58,7 @@ export function App() {
                 <Route path="events" element={<AccessEventsPage />} />
                 <Route path="backup-codes" element={<BackupCodesPage />} />
                 <Route path="schedules" element={<SchedulesPage />} />
+                <Route path="tenants" element={<TenantsPage />} />
                 <Route path="users" element={<UsersPage />} />
                 <Route path="webhooks" element={<WebhooksPage />} />
                 <Route path="audit" element={<AuditLogPage />} />

@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Smart Access Control — Dashboard API
-  version: 1.1.0
+  version: 1.2.0
   summary: The API behind the React operator dashboard.
   description: |
     Cookie-based Sanctum session auth for a first-party SPA served from the
@@ -659,6 +659,119 @@ paths:
       responses:
         '200': { description: The permission matrix. }
 
+  /tenants:
+    get:
+      tags: [Administration]
+      operationId: listTenants
+      summary: List tenants
+      description: |
+        Requires `tenant.manage`. Cross-tenant by definition, ordered by name,
+        with device, member and operator counts.
+      parameters:
+        - name: search
+          in: query
+          description: Matches part of the name or the slug.
+          schema: { type: string, maxLength: 120 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, suspended] }
+        - name: per_page
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+      responses:
+        '200':
+          description: A page of tenants.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Tenant' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Administration]
+      operationId: createTenant
+      summary: Create a tenant
+      description: |
+        Requires `tenant.manage`. A new tenant is `active`. Without a `slug`
+        one is made from the name; either way a slug that is already taken is
+        a `422` on `slug`. Written to the audit log as `tenant.created`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 120 }
+                slug: { type: string, maxLength: 60, pattern: '^[A-Za-z0-9_-]+$' }
+                settings: { $ref: '#/components/schemas/TenantSettings' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Tenant' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422':
+          description: "`validation_failed`"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /tenants/{tenant}:
+    patch:
+      tags: [Administration]
+      operationId: updateTenant
+      summary: Rename, activate or deactivate a tenant, or change its settings
+      description: |
+        Requires `tenant.manage`. The slug cannot be changed.
+
+        Setting `status` to `suspended` (shown as "Deactivated") takes effect
+        on the next request: the tenant's operators get `403`, and its devices
+        get `403 tenant_suspended`. Setting it back to `active` restores both.
+        An operator cannot deactivate the tenant their own account belongs to
+        (`422 cannot_suspend_own_tenant`).
+
+        `settings` is merged into the stored overrides: a key left out keeps
+        its value, and `null` clears the override so the platform default
+        applies again. Written to the audit log as `tenant.updated`.
+      parameters:
+        - name: tenant
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 120 }
+                status: { type: string, enum: [active, suspended] }
+                settings: { $ref: '#/components/schemas/TenantSettings' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Tenant' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422':
+          description: "`validation_failed`, `cannot_suspend_own_tenant`"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /tenants/{tenant}/switch:
     post:
       tags: [Administration]
@@ -919,6 +1032,39 @@ components:
             devices_offline: { type: integer }
             orphaned_enrollments: { type: integer }
             pending_commands: { type: integer }
+
+    Tenant:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        status: { type: string, enum: [active, suspended] }
+        settings: { $ref: '#/components/schemas/TenantSettings' }
+        devices_count: { type: integer }
+        members_count: { type: integer }
+        users_count: { type: integer }
+        created_at: { type: [string, 'null'], format: date-time }
+
+    TenantSettings:
+      type: object
+      description: |
+        Per-tenant overrides. A setting that is not present follows the
+        platform default. No other keys are accepted.
+      additionalProperties: false
+      properties:
+        backup_codes:
+          type: object
+          properties:
+            online_verification_only: { type: [boolean, 'null'] }
+        otp:
+          type: object
+          properties:
+            require_enrollment: { type: [boolean, 'null'] }
+        members:
+          type: object
+          properties:
+            require_approval: { type: [boolean, 'null'] }
 
     PageMeta:
       type: object

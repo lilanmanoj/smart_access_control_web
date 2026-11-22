@@ -21,11 +21,14 @@ export type MemberStatus = 'active' | 'suspended';
 
 export type EnrollmentStatus = 'pending' | 'active' | 'revoked' | 'orphaned';
 
+/** `suspended` is shown as "Deactivated" in the dashboard. */
+export type TenantStatus = 'active' | 'suspended';
+
 export interface Tenant {
     id: string;
     name: string;
     slug: string;
-    status: string;
+    status: TenantStatus;
     settings: Record<string, unknown>;
     devices_count?: number;
     members_count?: number;
