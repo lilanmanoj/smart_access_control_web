@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ensureCsrfCookie, toApiError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { formatRelative, humanise } from '@/lib/format';
+import { useTenantOptions } from '@/lib/tenants';
 import {
     Badge,
     Button,
@@ -17,11 +18,29 @@ import {
     Td,
     Th,
 } from '@/components/ui';
-import type { Paginated, User } from '@/types';
+import type { Paginated, Tenant, User } from '@/types';
 
 interface RoleDefinition {
     name: string;
     permissions: string[];
+}
+
+type ApiError = ReturnType<typeof toApiError>;
+
+interface InvitePayload {
+    name: string;
+    email: string;
+    roles: string[];
+    tenant_id?: string;
+}
+
+/** Only the fields that changed are sent, so each one is checked against its own permission. */
+interface UserChanges {
+    name?: string;
+    email?: string;
+    roles?: string[];
+    status?: 'active' | 'suspended';
+    tenant_id?: string;
 }
 
 /**
@@ -29,12 +48,31 @@ interface RoleDefinition {
  *
  * Invitations set no password: the invitee follows a reset link, so a password
  * never travels through this API or sits in an inbox.
+ *
+ * A tenant admin sees and edits the operators of their own tenant. Choosing or
+ * changing someone's tenant takes `tenant.manage`, which by default only a
+ * SuperAdmin holds. The API enforces all of this; the page only avoids offering
+ * what would be refused.
  */
 export function UsersPage() {
-    const { can, user: currentUser } = useAuth();
+    const { can, user: currentUser, impersonatedTenantId, refresh } = useAuth();
     const queryClient = useQueryClient();
     const [inviting, setInviting] = useState(false);
+    const [editing, setEditing] = useState<User | null>(null);
     const [notice, setNotice] = useState<string | null>(null);
+
+    // Gated on the permission, matching how the API decides who may name a tenant.
+    const mayChooseTenant = can('tenant.manage');
+    // The list is cross-tenant only for a SuperAdmin, so only they need the column.
+    const showTenantColumn = currentUser?.is_super_admin === true;
+    // A SuperAdmin viewing every tenant has none bound, so an invite must name one.
+    const inFleetView = currentUser?.is_super_admin === true && impersonatedTenantId === null;
+
+    const tenantsQuery = useTenantOptions();
+    // A deactivated tenant is refused as a target, so it is not offered.
+    const activeTenants = mayChooseTenant
+        ? (tenantsQuery.data ?? []).filter((tenant) => tenant.status === 'active')
+        : [];
 
     const usersQuery = useQuery({
         queryKey: ['users'],
@@ -57,7 +95,7 @@ export function UsersPage() {
     });
 
     const invite = useMutation({
-        mutationFn: async (payload: { name: string; email: string; roles: string[] }) => {
+        mutationFn: async (payload: InvitePayload) => {
             await ensureCsrfCookie();
             await api.post('/users', payload);
 
@@ -67,6 +105,7 @@ export function UsersPage() {
             setInviting(false);
             setNotice(`Invitation sent to ${email}. They choose their own password from the link in it.`);
             void queryClient.invalidateQueries({ queryKey: ['users'] });
+            void queryClient.invalidateQueries({ queryKey: ['tenants'] });
         },
     });
 
@@ -80,13 +119,36 @@ export function UsersPage() {
         onSuccess: (email) => setNotice(`A new invitation was sent to ${email}. Earlier links no longer work.`),
     });
 
-    const changeRole = useMutation({
-        mutationFn: async ({ id, role }: { id: string; role: string }) => {
+    const update = useMutation({
+        mutationFn: async ({ target, changes }: { target: User; changes: UserChanges }) => {
             await ensureCsrfCookie();
-            await api.patch(`/users/${id}`, { roles: [role] });
+            const { data } = await api.patch<{ data: User }>(`/users/${target.id}`, changes);
+
+            return { before: target, after: data.data, changes };
         },
-        onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['users'] }),
+        onSuccess: ({ before, after, changes }) => {
+            setEditing(null);
+            setNotice(
+                changes.email && after.status === 'invited'
+                    ? `Saved. A fresh invitation went to ${after.email}; the earlier link no longer works.`
+                    : `Saved changes to ${after.name}.`,
+            );
+            void queryClient.invalidateQueries({ queryKey: ['users'] });
+            if (changes.tenant_id !== undefined || changes.roles !== undefined) {
+                void queryClient.invalidateQueries({ queryKey: ['tenants'] });
+            }
+            // The header shows the signed-in operator's own name.
+            if (currentUser?.id === before.id) {
+                void refresh();
+            }
+        },
     });
+
+    const startEditing = (target: User) => {
+        update.reset();
+        setInviting(false);
+        setEditing(target);
+    };
 
     return (
         <div className="flex flex-col gap-4">
@@ -99,7 +161,13 @@ export function UsersPage() {
                 </div>
 
                 {can('user.invite') && (
-                    <Button variant="primary" onClick={() => setInviting((open) => !open)}>
+                    <Button
+                        variant="primary"
+                        onClick={() => {
+                            setEditing(null);
+                            setInviting((open) => !open);
+                        }}
+                    >
                         {inviting ? 'Cancel' : 'Invite user'}
                     </Button>
                 )}
@@ -109,9 +177,38 @@ export function UsersPage() {
                 <Panel title="Invite an operator" className="p-4">
                     <InviteForm
                         roles={rolesQuery.data ?? []}
+                        tenants={activeTenants}
+                        defaultTenantId={impersonatedTenantId ?? ''}
+                        tenantRequired={inFleetView}
                         pending={invite.isPending}
                         error={invite.error ? toApiError(invite.error) : null}
                         onSubmit={(payload) => invite.mutate(payload)}
+                    />
+                </Panel>
+            )}
+
+            {editing && (
+                <Panel title={`Edit ${editing.name}`} className="p-4">
+                    <EditUserForm
+                        // Remounted per user, so the fields start from that user's values.
+                        key={editing.id}
+                        target={editing}
+                        roles={rolesQuery.data ?? []}
+                        tenants={activeTenants}
+                        isSelf={currentUser?.id === editing.id}
+                        mayManageRoles={can('role.manage')}
+                        mayAssignTenant={mayChooseTenant}
+                        pending={update.isPending}
+                        error={update.error ? toApiError(update.error) : null}
+                        onSubmit={(changes) => {
+                            if (Object.keys(changes).length === 0) {
+                                setEditing(null);
+
+                                return;
+                            }
+                            update.mutate({ target: editing, changes });
+                        }}
+                        onCancel={() => setEditing(null)}
                     />
                 </Panel>
             )}
@@ -145,46 +242,40 @@ export function UsersPage() {
                             <thead style={{ background: 'var(--surface-sunken)' }}>
                                 <tr>
                                     <Th>Name</Th>
+                                    {showTenantColumn && <Th>Tenant</Th>}
                                     <Th>Role</Th>
                                     <Th>Two-factor</Th>
                                     <Th>Last signed in</Th>
                                     <Th>Status</Th>
+                                    {can('user.update') && (
+                                        <Th>
+                                            <span className="sr-only">Actions</span>
+                                        </Th>
+                                    )}
                                 </tr>
                             </thead>
                             <tbody>
                                 {usersQuery.data?.data.map((user) => (
                                     <tr key={user.id} style={{ borderTop: '1px solid var(--border)' }}>
                                         <Td>
-                                            <div className="font-medium">{user.name}</div>
+                                            <div className="font-medium">
+                                                {user.name}
+                                                {currentUser?.id === user.id && (
+                                                    <span className="ml-1 text-xs" style={{ color: 'var(--text-subtle)' }}>
+                                                        (you)
+                                                    </span>
+                                                )}
+                                            </div>
                                             <div className="text-xs" style={{ color: 'var(--text-subtle)' }}>
                                                 {user.email}
                                             </div>
                                         </Td>
-                                        <Td>
-                                            {/* Nobody edits their own role — that
-                                                is how a device_manager quietly
-                                                becomes a tenant_admin. */}
-                                            {can('role.manage') && currentUser?.id !== user.id ? (
-                                                <Select
-                                                    aria-label={`Role for ${user.name}`}
-                                                    value={user.roles?.[0] ?? ''}
-                                                    onChange={(event) =>
-                                                        changeRole.mutate({
-                                                            id: user.id,
-                                                            role: event.target.value,
-                                                        })
-                                                    }
-                                                >
-                                                    {rolesQuery.data?.map((role) => (
-                                                        <option key={role.name} value={role.name}>
-                                                            {humanise(role.name)}
-                                                        </option>
-                                                    ))}
-                                                </Select>
-                                            ) : (
-                                                humanise(user.roles?.[0] ?? 'none')
-                                            )}
-                                        </Td>
+                                        {showTenantColumn && (
+                                            <Td>
+                                                <TenantCell user={user} />
+                                            </Td>
+                                        )}
+                                        <Td>{humanise(user.roles?.[0] ?? 'none')}</Td>
                                         <Td>
                                             {user.two_factor_enabled ? (
                                                 <Badge tone="ok" glyph="✓">
@@ -225,6 +316,20 @@ export function UsersPage() {
                                                 </span>
                                             )}
                                         </Td>
+                                        {can('user.update') && (
+                                            <Td className="text-right">
+                                                {/* A tenant operator never reaches a SuperAdmin's account. */}
+                                                {(currentUser?.is_super_admin || !user.is_super_admin) && (
+                                                    <Button
+                                                        variant="ghost"
+                                                        aria-label={`Edit ${user.name}`}
+                                                        onClick={() => startEditing(user)}
+                                                    >
+                                                        Edit
+                                                    </Button>
+                                                )}
+                                            </Td>
+                                        )}
                                     </tr>
                                 ))}
                             </tbody>
@@ -246,27 +351,141 @@ export function UsersPage() {
     );
 }
 
+function TenantCell({ user }: { user: User }) {
+    if (user.is_super_admin) {
+        return (
+            <Badge tone="accent" glyph="◇">
+                All tenants
+            </Badge>
+        );
+    }
+
+    if (!user.tenant) {
+        // Every request such an account makes is refused; editing it is the fix.
+        return (
+            <Badge tone="danger" glyph="!">
+                No tenant
+            </Badge>
+        );
+    }
+
+    return <span>{user.tenant.name}</span>;
+}
+
+function TenantPicker({
+    id,
+    tenants,
+    value,
+    required,
+    emptyLabel,
+    hint,
+    error,
+    onChange,
+}: {
+    id: string;
+    tenants: Tenant[];
+    value: string;
+    required: boolean;
+    emptyLabel: string;
+    hint: string;
+    error?: string;
+    onChange(value: string): void;
+}) {
+    return (
+        <Field id={id} label="Tenant" hint={hint} error={error}>
+            <Select id={id} required={required} value={value} onChange={(event) => onChange(event.target.value)}>
+                <option value="">{emptyLabel}</option>
+                {tenants.map((tenant) => (
+                    <option key={tenant.id} value={tenant.id}>
+                        {tenant.name}
+                        {tenant.status === 'active' ? '' : ' (deactivated)'}
+                    </option>
+                ))}
+            </Select>
+        </Field>
+    );
+}
+
+function RoleSelect({
+    id,
+    roles,
+    value,
+    hint,
+    error,
+    onChange,
+}: {
+    id: string;
+    roles: RoleDefinition[];
+    value: string;
+    hint?: string;
+    error?: string;
+    onChange(value: string): void;
+}) {
+    return (
+        <Field id={id} label="Role" hint={hint} error={error}>
+            <Select id={id} value={value} onChange={(event) => onChange(event.target.value)}>
+                {roles.map((definition) => (
+                    <option key={definition.name} value={definition.name}>
+                        {humanise(definition.name)}
+                    </option>
+                ))}
+            </Select>
+        </Field>
+    );
+}
+
+function FormError({ error }: { error: ApiError | null }) {
+    // Field errors are shown beside their field; this is for everything else.
+    if (!error || Object.keys(error.fields).length > 0) {
+        return null;
+    }
+
+    return (
+        <span role="alert" className="ml-3 text-xs" style={{ color: 'var(--danger-text)' }}>
+            {error.message}
+        </span>
+    );
+}
+
 function InviteForm({
     roles,
+    tenants,
+    defaultTenantId,
+    tenantRequired,
     pending,
     error,
     onSubmit,
 }: {
     roles: RoleDefinition[];
+    /** Empty unless the operator holds `tenant.manage`. */
+    tenants: Tenant[];
+    defaultTenantId: string;
+    tenantRequired: boolean;
     pending: boolean;
-    error: ReturnType<typeof toApiError> | null;
-    onSubmit(payload: { name: string; email: string; roles: string[] }): void;
+    error: ApiError | null;
+    onSubmit(payload: InvitePayload): void;
 }) {
     const [name, setName] = useState('');
     const [email, setEmail] = useState('');
     const [role, setRole] = useState('operator');
+    const [tenantId, setTenantId] = useState(defaultTenantId);
+
+    // A SuperAdmin has no tenant of their own, so there is nothing to choose.
+    const showTenantPicker = tenants.length > 0 && role !== 'super_admin';
 
     return (
         <form
             className="grid gap-3 sm:grid-cols-3"
             onSubmit={(event) => {
                 event.preventDefault();
-                onSubmit({ name, email, roles: [role] });
+                onSubmit({
+                    name,
+                    email,
+                    roles: [role],
+                    // Omitted when not chosen, so the invitee joins the tenant
+                    // the request is already bound to.
+                    ...(showTenantPicker && tenantId ? { tenant_id: tenantId } : {}),
+                });
             }}
         >
             <Field id="invite_name" label="Name" error={error?.fieldError('name')}>
@@ -288,36 +507,213 @@ function InviteForm({
                 />
             </Field>
 
-            <Field
+            <RoleSelect
                 id="invite_role"
-                label="Role"
-                hint="Device and member management require a second factor."
+                roles={roles}
+                value={role}
+                hint={
+                    role === 'super_admin'
+                        ? 'Works across every tenant, so belongs to none.'
+                        : 'Device and member management require a second factor.'
+                }
                 error={error?.fieldError('roles')}
-            >
-                <Select
-                    id="invite_role"
-                    value={role}
-                    onChange={(event) => setRole(event.target.value)}
-                >
-                    {roles.map((definition) => (
-                        <option key={definition.name} value={definition.name}>
-                            {humanise(definition.name)}
-                        </option>
-                    ))}
-                </Select>
-            </Field>
+                onChange={setRole}
+            />
+
+            {showTenantPicker && (
+                <TenantPicker
+                    id="invite_tenant"
+                    tenants={tenants}
+                    value={tenantId}
+                    required={tenantRequired}
+                    emptyLabel={tenantRequired ? 'Choose a tenant…' : 'The tenant I am viewing'}
+                    hint={
+                        tenantRequired
+                            ? 'You are viewing all tenants, so this user needs one.'
+                            : 'Defaults to the tenant you are viewing.'
+                    }
+                    error={error?.fieldError('tenant_id')}
+                    onChange={setTenantId}
+                />
+            )}
 
             <div className="sm:col-span-3">
                 <Button type="submit" variant="primary" loading={pending}>
                     Send invitation
                 </Button>
-                {error && Object.keys(error.fields).length === 0 && (
-                    <span role="alert" className="ml-3 text-xs" style={{ color: 'var(--danger-text)' }}>
-                        {error.message}
-                    </span>
-                )}
+                <FormError error={error} />
             </div>
         </form>
+    );
+}
+
+function EditUserForm({
+    target,
+    roles,
+    tenants,
+    isSelf,
+    mayManageRoles,
+    mayAssignTenant,
+    pending,
+    error,
+    onSubmit,
+    onCancel,
+}: {
+    target: User;
+    roles: RoleDefinition[];
+    /** Active tenants; empty unless the operator holds `tenant.manage`. */
+    tenants: Tenant[];
+    isSelf: boolean;
+    mayManageRoles: boolean;
+    mayAssignTenant: boolean;
+    pending: boolean;
+    error: ApiError | null;
+    onSubmit(changes: UserChanges): void;
+    onCancel(): void;
+}) {
+    const currentRole = target.roles?.[0] ?? '';
+    const currentTenantId = target.tenant?.id ?? '';
+
+    const [name, setName] = useState(target.name);
+    const [email, setEmail] = useState(target.email);
+    const [role, setRole] = useState(currentRole);
+    const [status, setStatus] = useState(target.status);
+    const [tenantId, setTenantId] = useState(currentTenantId);
+
+    // Nobody changes their own role, status or tenant: that is how an account
+    // escalates itself, or the last administrator locks themselves out.
+    const showRole = mayManageRoles && !isSelf;
+    // An invitee becomes active by accepting, not by being edited.
+    const showStatus = !isSelf && target.status !== 'invited';
+    const becomesSuperAdmin = role === 'super_admin';
+    const showTenant = mayAssignTenant && !isSelf && !becomesSuperAdmin;
+
+    // The user's current tenant stays selectable even if it has been deactivated.
+    const tenantOptions =
+        target.tenant && !tenants.some((tenant) => tenant.id === target.tenant?.id)
+            ? [target.tenant, ...tenants]
+            : tenants;
+
+    // Roles a tenant admin cannot grant are not in the list, but the user's
+    // current one still has to display.
+    const roleOptions =
+        currentRole && !roles.some((definition) => definition.name === currentRole)
+            ? [{ name: currentRole, permissions: [] }, ...roles]
+            : roles;
+
+    return (
+        <form
+            className="grid gap-3 sm:grid-cols-3"
+            onSubmit={(event) => {
+                event.preventDefault();
+
+                const changes: UserChanges = {};
+                if (name !== target.name) changes.name = name;
+                if (email !== target.email) changes.email = email;
+                if (showRole && role !== currentRole) changes.roles = [role];
+                if (showStatus && status !== target.status) changes.status = status as 'active' | 'suspended';
+                if (showTenant && tenantId !== currentTenantId) changes.tenant_id = tenantId;
+
+                onSubmit(changes);
+            }}
+        >
+            <Field id="edit_name" label="Name" error={error?.fieldError('name')}>
+                <Input id="edit_name" required value={name} onChange={(event) => setName(event.target.value)} />
+            </Field>
+
+            <Field
+                id="edit_email"
+                label="Email"
+                hint={
+                    target.status === 'invited'
+                        ? 'Changing it sends a fresh invitation to the new address.'
+                        : 'They sign in with this address.'
+                }
+                error={error?.fieldError('email')}
+            >
+                <Input
+                    id="edit_email"
+                    type="email"
+                    required
+                    value={email}
+                    onChange={(event) => setEmail(event.target.value)}
+                />
+            </Field>
+
+            {showRole ? (
+                <RoleSelect
+                    id="edit_role"
+                    roles={roleOptions}
+                    value={role}
+                    hint={
+                        becomesSuperAdmin && target.tenant
+                            ? `A super administrator belongs to no tenant, so saving removes them from ${target.tenant.name}.`
+                            : undefined
+                    }
+                    error={error?.fieldError('roles')}
+                    onChange={setRole}
+                />
+            ) : (
+                <ReadOnly
+                    label="Role"
+                    value={humanise(currentRole || 'none')}
+                    hint={isSelf ? 'Another administrator has to change your role.' : undefined}
+                />
+            )}
+
+            {showStatus && (
+                <Field id="edit_status" label="Status" error={error?.fieldError('status')}>
+                    <Select id="edit_status" value={status} onChange={(event) => setStatus(event.target.value)}>
+                        <option value="active">Active</option>
+                        <option value="suspended">Suspended — cannot sign in</option>
+                    </Select>
+                </Field>
+            )}
+
+            {showTenant && (
+                <TenantPicker
+                    id="edit_tenant"
+                    tenants={tenantOptions}
+                    value={tenantId}
+                    // Anyone but a SuperAdmin needs a tenant to sign in at all.
+                    required
+                    emptyLabel="Choose a tenant…"
+                    hint={
+                        currentTenantId && tenantId !== currentTenantId
+                            ? 'They lose access to their current tenant as soon as you save.'
+                            : 'The tenant whose doors and members this user manages.'
+                    }
+                    error={error?.fieldError('tenant_id')}
+                    onChange={setTenantId}
+                />
+            )}
+
+            <div className="flex flex-wrap items-center gap-2 sm:col-span-3">
+                <Button type="submit" variant="primary" loading={pending}>
+                    Save changes
+                </Button>
+                <Button type="button" variant="ghost" onClick={onCancel}>
+                    Cancel
+                </Button>
+                <FormError error={error} />
+            </div>
+        </form>
+    );
+}
+
+function ReadOnly({ label, value, hint }: { label: string; value: string; hint?: string }) {
+    return (
+        <div className="flex flex-col gap-1">
+            <span className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>
+                {label}
+            </span>
+            <span className="py-1.5 text-sm">{value}</span>
+            {hint && (
+                <p className="text-xs" style={{ color: 'var(--text-subtle)' }}>
+                    {hint}
+                </p>
+            )}
+        </div>
     );
 }
 
