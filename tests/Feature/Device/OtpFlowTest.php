@@ -79,6 +79,26 @@ class OtpFlowTest extends TestCase
         }
     }
 
+    /**
+     * The keypad is 0-9, `*` and `#`: there is no plus key. A member saved
+     * from the portal as +94771234567 must still be found from whatever a
+     * person types for "my number with the country code".
+     */
+    #[Test]
+    public function a_number_typed_without_a_plus_key_still_finds_the_member(): void
+    {
+        $tenant = Tenant::factory()->create();
+        ['device' => $device, 'credential' => $credential] = $this->provisionDevice($tenant);
+        Member::factory()->for($tenant)->create(['phone' => '+94771234567']);
+
+        foreach (['94771234567', '940771234567', '*94771234567', '#940771234567', '0771234567#'] as $typed) {
+            $this->postJson('/api/v1/otp-requests', ['phone' => $typed],
+                $this->deviceHeaders($device, $credential))
+                ->assertOk()
+                ->assertJsonPath('valid', true);
+        }
+    }
+
     #[Test]
     public function an_unknown_number_is_reported_as_invalid(): void
     {
@@ -123,6 +143,25 @@ class OtpFlowTest extends TestCase
         $this->assertSame('otp', $event->method->value);
         $this->assertSame('denied', $event->result->value);
         $this->assertSame('not_enrolled', $event->reason);
+    }
+
+    #[Test]
+    public function a_number_that_cannot_be_read_is_refused_and_logged(): void
+    {
+        ['device' => $device, 'credential' => $credential] = $this->provisionDevice();
+
+        $this->postJson('/api/v1/otp-requests', ['phone' => '077*1234567'],
+            $this->deviceHeaders($device, $credential))
+            ->assertOk()
+            ->assertExactJson(['valid' => false]);
+
+        $event = AccessEvent::withoutGlobalScopes()->firstOrFail();
+
+        $this->assertSame('denied', $event->result->value);
+        $this->assertSame('not_enrolled', $event->reason);
+        $this->assertTrue($event->metadata['phone_unrecognised']);
+        // Masked, never the whole number.
+        $this->assertSame('077*1**4567', $event->metadata['phone']);
     }
 
     #[Test]

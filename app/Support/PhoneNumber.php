@@ -14,6 +14,16 @@ use InvalidArgumentException;
  * own 15 digits. Normalising here — once, at the edge — is what makes the OTP
  * lookup work: the user types 0771234567 on the keypad and the member row
  * holds +94771234567.
+ *
+ * The keypad is digits, `*` and `#`, with no `+`. So everything a person might
+ * reasonably type for the same number has to land on the same E.164 string:
+ *
+ *   0771234567       national, with the trunk prefix
+ *   94771234567      country code, no plus
+ *   940771234567     country code *and* the trunk prefix, which is how most
+ *                    people write their number when told to "add the code"
+ *   0094771234567    the international dialling prefix
+ *   *94771234567     `*` or `#` where the plus would go; `#` as the enter key
  */
 final class PhoneNumber
 {
@@ -29,8 +39,15 @@ final class PhoneNumber
     public static function parse(string $input, ?string $defaultCountryCode = null): self
     {
         $countryCode = $defaultCountryCode ?? (string) config('access.phone.default_country_code', '+94');
+        $trunk = (string) config('access.phone.trunk_prefix', '0');
 
         $cleaned = preg_replace('/[\s\-().]/', '', trim($input)) ?? '';
+
+        // The keypad has no plus key. A `*` or `#` typed where the plus would
+        // go, and a `#` pressed as the enter key, carry no digits of the
+        // number. Only the ends are trimmed: a symbol in the middle is a typo,
+        // and guessing past it could match somebody else's number.
+        $cleaned = preg_replace('/^[*#]+|#+$/', '', $cleaned) ?? '';
 
         if ($cleaned === '') {
             throw new InvalidArgumentException('A phone number is required.');
@@ -43,12 +60,20 @@ final class PhoneNumber
             str_starts_with($cleaned, '+') => $cleaned,
 
             // A national number: drop the trunk prefix, add the country code.
-            str_starts_with($cleaned, '0') => $countryCode.substr($cleaned, 1),
+            $trunk !== '' && str_starts_with($cleaned, $trunk) => $countryCode.substr($cleaned, strlen($trunk)),
 
             // Bare digits with no trunk prefix — assume the country code is
             // already there. 94771234567 becomes +94771234567.
             default => '+'.$cleaned,
         };
+
+        // The country code followed by the trunk prefix: 94 0771234567. The
+        // trunk prefix is never part of an international number, so it is
+        // dropped. Only for the home country, whose trunk prefix is known —
+        // some countries (Italy) keep a leading 0 after the country code.
+        if ($trunk !== '' && str_starts_with($normalised, $countryCode.$trunk)) {
+            $normalised = $countryCode.substr($normalised, strlen($countryCode.$trunk));
+        }
 
         if (! preg_match('/^\+[1-9]\d{6,14}$/', $normalised)) {
             throw new InvalidArgumentException('That is not a valid international phone number.');
@@ -91,13 +116,27 @@ final class PhoneNumber
      */
     public function masked(): string
     {
-        $length = strlen($this->e164);
+        return self::mask($this->e164);
+    }
+
+    /**
+     * Mask what was typed when it could not be parsed, so an operator can see
+     * the shape of the mistake without the log holding the whole number.
+     */
+    public static function maskInput(string $input): string
+    {
+        return self::mask(substr(trim($input), 0, 20));
+    }
+
+    private static function mask(string $value): string
+    {
+        $length = strlen($value);
 
         if ($length <= 8) {
             return str_repeat('*', $length);
         }
 
-        return substr($this->e164, 0, 5).str_repeat('*', $length - 9).substr($this->e164, -4);
+        return substr($value, 0, 5).str_repeat('*', $length - 9).substr($value, -4);
     }
 
     public function __toString(): string
