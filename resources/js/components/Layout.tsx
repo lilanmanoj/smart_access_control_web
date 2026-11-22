@@ -20,6 +20,7 @@ const NAV: NavItem[] = [
     { to: '/events', label: 'Access events', glyph: '≡', permission: 'event.view' },
     { to: '/backup-codes', label: 'Backup codes', glyph: '⌨', permission: 'backupcode.view' },
     { to: '/schedules', label: 'Schedules', glyph: '◷', permission: 'schedule.view' },
+    { to: '/tenants', label: 'Tenants', glyph: '⌂', permission: 'tenant.manage' },
     { to: '/users', label: 'Users & roles', glyph: '⚿', permission: 'user.view' },
     { to: '/webhooks', label: 'Webhooks', glyph: '⇄', permission: 'webhook.manage' },
     { to: '/audit', label: 'Audit log', glyph: '✎', permission: 'audit.view' },

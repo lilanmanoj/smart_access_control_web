@@ -91,7 +91,12 @@ export function DevicesPage() {
                     className="p-4"
                 >
                     <AddDeviceForm
-                        tenants={mayChooseTenant ? (tenantsQuery.data ?? []) : []}
+                        // A deactivated tenant is refused as a target, so it is not offered.
+                        tenants={
+                            mayChooseTenant
+                                ? (tenantsQuery.data ?? []).filter((tenant) => tenant.status === 'active')
+                                : []
+                        }
                         // Pre-selected when they have switched into a tenant;
                         // an explicit choice when they are viewing them all.
                         defaultTenantId={impersonatedTenantId ?? ''}

@@ -7,6 +7,7 @@ import type {
     EnrollmentStatus,
     MemberStatus,
     TemplateSyncStatus,
+    TenantStatus,
 } from '@/types';
 
 /**
@@ -82,6 +83,22 @@ export function AdministrativeStateBadge({ status }: { status: DeviceStatus }) {
                 </Badge>
             );
     }
+}
+
+/**
+ * A deactivated tenant is refused everywhere: its operators on their next
+ * request, its doors whenever they call the server.
+ */
+export function TenantStatusBadge({ status }: { status: TenantStatus }) {
+    return status === 'active' ? (
+        <Badge tone="ok" glyph="✓">
+            Active
+        </Badge>
+    ) : (
+        <Badge tone="danger" glyph="⏸">
+            Deactivated
+        </Badge>
+    );
 }
 
 export function MemberStatusBadge({
