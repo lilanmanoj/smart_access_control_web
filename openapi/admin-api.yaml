@@ -626,8 +626,117 @@ paths:
         carries a one-time link to `/accept-invitation`, so a password never
         travels through this API or sits in an inbox. The link expires after
         `INVITATION_EXPIRE_MINUTES` (default 4320, three days).
+
+        The invitee joins the tenant the request is bound to: the caller's
+        own, or the one a SuperAdmin has switched into. Only a caller holding
+        `tenant.manage` may name another with `tenant_id` (otherwise
+        `403 tenant_selection_forbidden`), and must when no tenant is bound
+        (`422`, field error on `tenant_id`). A `super_admin` invitee has no
+        tenant, so naming one for them is a `422`. Only a SuperAdmin may grant
+        `super_admin`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, roles]
+              properties:
+                name: { type: string, maxLength: 120 }
+                email: { type: string, format: email, maxLength: 180 }
+                roles: { type: array, minItems: 1, items: { type: string } }
+                tenant_id:
+                  type: [string, 'null']
+                  format: uuid
+                  description: Tenant id (its UUID). Requires `tenant.manage`.
       responses:
         '201': { description: Invited. }
+        '403':
+          description: "`tenant_selection_forbidden`"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: "`validation_failed`, `unknown_tenant` or `tenant_suspended`"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /users/{user}:
+    parameters:
+      - name: user
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Administration]
+      operationId: updateUser
+      summary: Edit an operator, or move them to another tenant
+      description: |
+        Send only the fields that change; each is checked against its own
+        permission. `name` and `email` need `user.update`, `roles` needs
+        `role.manage`, and `tenant_id` needs `tenant.manage`. Without
+        `tenant.manage` the caller reaches only users of their own tenant,
+        never a SuperAdmin (`403`).
+
+        - Nobody changes their own `roles`, `status` or `tenant_id`
+          (`403 cannot_change_own_access`), SuperAdmins included.
+        - An invitee's `status` cannot change; they become active by
+          accepting (`422 still_invited`). Changing an invitee's `email`
+          withdraws the old link and sends a fresh invitation to the new
+          address.
+        - Granting `super_admin` removes the user from their tenant; taking it
+          away requires a `tenant_id` in the same request. Any user other than
+          a SuperAdmin must end up with a tenant (`422`, field error on
+          `tenant_id`).
+
+        Written to the audit log as `user.updated`, plus
+        `user.tenant_assigned` when the tenant changes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 120 }
+                email: { type: string, format: email, maxLength: 180 }
+                status: { type: string, enum: [active, suspended] }
+                roles: { type: array, minItems: 1, items: { type: string } }
+                tenant_id: { type: [string, 'null'], format: uuid }
+      responses:
+        '200':
+          description: The updated user.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/User' }
+        '403':
+          description: "`forbidden`, `cannot_change_own_access` or `tenant_selection_forbidden`"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: "`validation_failed`, `still_invited`, `unknown_tenant` or `tenant_suspended`"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      tags: [Administration]
+      operationId: deleteUser
+      summary: Delete an operator
+      description: |
+        Requires `user.delete`, within the same reach as editing. Nobody
+        deletes their own account.
+      responses:
+        '200': { description: Deleted. }
+        '403':
+          description: "`forbidden`"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /users/{user}/invitations:
     parameters:
@@ -841,6 +950,9 @@ components:
         email: { type: string, format: email }
         status: { type: string }
         roles: { type: array, items: { type: string } }
+        tenant:
+          description: Absent for a SuperAdmin, who belongs to no tenant.
+          allOf: [{ $ref: '#/components/schemas/Tenant' }]
         is_super_admin: { type: boolean }
         two_factor_enabled: { type: boolean }
         two_factor_required: { type: boolean }
