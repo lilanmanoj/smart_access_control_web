@@ -55,6 +55,20 @@ class OtpService
         $number = PhoneNumber::tryParse($phone);
 
         if ($number === null) {
+            // A number that cannot be parsed belongs to nobody, so the panel
+            // gets the same answer as for an unknown one. It is still logged:
+            // otherwise a keypad entry the server cannot read fails without
+            // trace, and nobody can tell the door is turning people away.
+            $this->events->record($device, [
+                'method' => AccessMethod::Otp,
+                'result' => AccessResult::Denied,
+                'reason' => DenialReason::NotEnrolled,
+                'metadata' => [
+                    'phone' => PhoneNumber::maskInput($phone),
+                    'phone_unrecognised' => true,
+                ],
+            ]);
+
             return null;
         }
 

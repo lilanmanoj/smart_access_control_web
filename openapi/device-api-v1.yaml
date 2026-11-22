@@ -436,10 +436,14 @@ paths:
                 phone:
                   type: string
                   description: |
-                    Normalised to E.164 server-side, so `0771234567` and
-                    `+94771234567` both work. Refused if the normalised form
-                    exceeds the 14 characters the panel can store.
-                  examples: ['+94771234567']
+                    Normalised to E.164 server-side. Send what was typed;
+                    the keypad has no `+`, so all of these are the same
+                    number: `0771234567`, `94771234567`, `940771234567`,
+                    `0094771234567`, `*94771234567`, and `+94771234567`. A
+                    leading `*` or `#` and a trailing `#` are ignored. Refused
+                    if the normalised form exceeds the 14 characters the panel
+                    can store.
+                  examples: ['0771234567', '+94771234567']
                 fingerprint_slot:
                   type: [integer, 'null']
                   examples: [7]
@@ -491,7 +495,17 @@ paths:
               required: [phone]
               properties:
                 device_id: { $ref: '#/components/schemas/DeviceIdClaim' }
-                phone: { type: string, examples: ['+94771234567'] }
+                phone:
+                  type: string
+                  description: |
+                    What the user typed. Normalised exactly as for
+                    enrolment, so a number typed without a plus — `94…`,
+                    `940…`, `0…`, or with `*` where the plus would go — finds
+                    a member saved from the dashboard as `+94…`. A number
+                    that cannot be read gets `valid: false`, like an unknown
+                    one, and is logged as a `not_enrolled` denial with
+                    `metadata.phone_unrecognised`.
+                  examples: ['0771234567', '94771234567']
       responses:
         '200':
           description: The outcome of the lookup.
