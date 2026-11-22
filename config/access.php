@@ -157,6 +157,9 @@ return [
 
     'phone' => [
         'default_country_code' => env('PHONE_DEFAULT_COUNTRY_CODE', '+94'),
+        // Dialled before a national number and dropped from the international
+        // form: 0771234567 is +94771234567. Empty for a country without one.
+        'trunk_prefix' => env('PHONE_TRUNK_PREFIX', '0'),
         'max_length' => 14,
         'min_digits' => 10,
     ],

@@ -27,6 +27,14 @@ class PhoneNumberTest extends TestCase
             'bare country code' => ['94771234567', '+94771234567'],
             'spaces and dashes' => ['077 123-4567', '+94771234567'],
             'parentheses' => ['(077) 1234567', '+94771234567'],
+            // The keypad has no plus key, so people improvise.
+            'country code and trunk prefix' => ['940771234567', '+94771234567'],
+            'plus, country code and trunk prefix' => ['+940771234567', '+94771234567'],
+            '00, country code and trunk prefix' => ['00940771234567', '+94771234567'],
+            'star for plus' => ['*94771234567', '+94771234567'],
+            'hash for plus' => ['#94771234567', '+94771234567'],
+            'hash as the enter key' => ['0771234567#', '+94771234567'],
+            'star before a national number' => ['*0771234567', '+94771234567'],
         ];
     }
 
@@ -35,6 +43,37 @@ class PhoneNumberTest extends TestCase
     public function it_normalises_to_e164(string $input, string $expected): void
     {
         $this->assertSame($expected, (string) PhoneNumber::parse($input));
+    }
+
+    /**
+     * Only the ends are trimmed. A symbol in the middle is a typo, and reading
+     * past it could match somebody else's number.
+     */
+    #[Test]
+    public function a_symbol_inside_the_number_is_not_guessed_past(): void
+    {
+        $this->assertNull(PhoneNumber::tryParse('077*1234567'));
+    }
+
+    /** Another country's numbers are left alone, whatever digit follows the code. */
+    #[Test]
+    public function the_trunk_prefix_is_only_dropped_after_the_home_country_code(): void
+    {
+        $this->assertSame('+390612345678', (string) PhoneNumber::parse('+390612345678'));
+    }
+
+    #[Test]
+    public function a_country_without_a_trunk_prefix_can_turn_it_off(): void
+    {
+        config(['access.phone.trunk_prefix' => '']);
+
+        $this->assertSame('+940771234567', (string) PhoneNumber::parse('940771234567'));
+    }
+
+    #[Test]
+    public function unparseable_input_is_masked_for_the_log(): void
+    {
+        $this->assertSame('077*1**4567', PhoneNumber::maskInput('077*1234567'));
     }
 
     /**
