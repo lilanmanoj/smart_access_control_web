@@ -47,6 +47,7 @@ class DashboardApiTest extends TestCase
         $this->postJson('/api/admin/v1/devices', [
             'device_id' => 'SMA_1111',
             'name' => 'Should not be created',
+            'timezone' => 'Asia/Colombo',
         ])->assertForbidden();
 
         $this->assertDatabaseMissing('devices', ['device_id' => 'SMA_1111']);
@@ -250,6 +251,7 @@ class DashboardApiTest extends TestCase
         $this->postJson('/api/admin/v1/devices', [
             'device_id' => 'SMA_DEMO_01',
             'name' => 'Demo Device 01',
+            'timezone' => 'Asia/Colombo',
             'location' => 'Laboratory',
         ])
             ->assertStatus(409)
@@ -275,6 +277,7 @@ class DashboardApiTest extends TestCase
         $this->postJson('/api/admin/v1/devices', [
             'device_id' => 'SMA_DEMO_01',
             'name' => 'Demo Device 01',
+            'timezone' => 'Asia/Colombo',
             'location' => 'Laboratory',
         ])->assertCreated();
 
@@ -300,6 +303,7 @@ class DashboardApiTest extends TestCase
         $this->postJson('/api/admin/v1/devices', [
             'device_id' => 'SMA_DEMO_01',
             'name' => 'Demo Device 01',
+            'timezone' => 'Asia/Colombo',
             'location' => 'Laboratory',
             'tenant_id' => $target->uuid,
         ])
@@ -328,6 +332,7 @@ class DashboardApiTest extends TestCase
         $this->postJson('/api/admin/v1/devices', [
             'device_id' => 'SMA_DEMO_01',
             'name' => 'Demo Device 01',
+            'timezone' => 'Asia/Colombo',
             'tenant_id' => $otherTenant->uuid,
         ])
             ->assertForbidden()
@@ -345,6 +350,7 @@ class DashboardApiTest extends TestCase
         $this->postJson('/api/admin/v1/devices', [
             'device_id' => 'SMA_DEMO_01',
             'name' => 'Demo Device 01',
+            'timezone' => 'Asia/Colombo',
             'tenant_id' => '01a00000-0000-7000-8000-000000000000',
         ])
             ->assertStatus(422)
@@ -362,6 +368,7 @@ class DashboardApiTest extends TestCase
         $this->postJson('/api/admin/v1/devices', [
             'device_id' => 'SMA_DEMO_01',
             'name' => 'Demo Device 01',
+            'timezone' => 'Asia/Colombo',
             'tenant_id' => $suspended->uuid,
         ])
             ->assertStatus(422)
@@ -386,6 +393,7 @@ class DashboardApiTest extends TestCase
         $this->postJson('/api/admin/v1/devices', [
             'device_id' => 'SMA_4821',
             'name' => 'Another tenant, same panel id',
+            'timezone' => 'Asia/Colombo',
             'tenant_id' => $beta->uuid,
         ])->assertCreated();
 
@@ -393,6 +401,7 @@ class DashboardApiTest extends TestCase
         $this->postJson('/api/admin/v1/devices', [
             'device_id' => 'SMA_4821',
             'name' => 'Duplicate',
+            'timezone' => 'Asia/Colombo',
             'tenant_id' => $beta->uuid,
         ])->assertStatus(422);
     }

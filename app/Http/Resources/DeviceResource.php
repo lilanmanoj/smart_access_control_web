@@ -18,6 +18,9 @@ class DeviceResource extends JsonResource
             'device_id' => $this->device_id,
             'name' => $this->name,
             'location' => $this->location,
+            // Null only for a device created before timezones existed and not
+            // edited since; the dashboard then suggests the tenant's.
+            'timezone' => $this->timezone,
             'status' => $this->status->value,
             // `status` is the administrative state; `is_online` is whether the
             // door is currently answering. A suspended device can still be
@@ -42,6 +45,7 @@ class DeviceResource extends JsonResource
             'tenant' => $this->whenLoaded('tenant', fn (): array => [
                 'id' => $this->tenant->uuid,
                 'name' => $this->tenant->name,
+                'timezone' => $this->tenant->timezone,
             ]),
             'active_backup_code_set' => new BackupCodeSetResource($this->whenLoaded('activeBackupCodeSet')),
             'pending_commands' => DeviceCommandResource::collection($this->whenLoaded('commands')),

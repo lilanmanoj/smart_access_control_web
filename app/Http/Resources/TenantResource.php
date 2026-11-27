@@ -18,6 +18,9 @@ class TenantResource extends JsonResource
             'name' => $this->name,
             'slug' => $this->slug,
             'status' => $this->status,
+            // IANA name, e.g. Asia/Colombo. Null only for a tenant created
+            // before timezones existed and not edited since.
+            'timezone' => $this->timezone,
             'settings' => $this->settings ?? [],
             'devices_count' => $this->whenCounted('devices'),
             'members_count' => $this->whenCounted('members'),

@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Smart Access Control — Dashboard API
-  version: 1.3.0
+  version: 1.4.0
   summary: The API behind the React operator dashboard.
   description: |
     Cookie-based Sanctum session auth for a first-party SPA served from the
@@ -238,6 +238,33 @@ paths:
               schema: { $ref: '#/components/schemas/DashboardSummary' }
 
   # ==========================================================================
+  /timezones:
+    get:
+      tags: [Administration]
+      operationId: listTimezones
+      summary: The timezones a tenant or device may be given
+      description: |
+        Every IANA timezone the API accepts for a tenant's or device's
+        `timezone`, with its UTC offset today (the offset moves with daylight
+        saving). Exactly the list the validation uses, so a dropdown built
+        from it never offers a value the API refuses. Any signed-in operator.
+      responses:
+        '200':
+          description: All accepted timezones, in alphabetical order.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, examples: [Asia/Colombo] }
+                        offset: { type: string, pattern: '^[+-]\d{2}:\d{2}$', examples: ['+05:30'] }
+
+  # ==========================================================================
   /devices:
     get:
       tags: [Devices]
@@ -269,11 +296,14 @@ paths:
           application/json:
             schema:
               type: object
-              required: [device_id, name]
+              required: [device_id, name, timezone]
               properties:
                 device_id: { type: string, pattern: '^[A-Za-z0-9_-]+$' }
                 name: { type: string }
                 location: { type: [string, 'null'] }
+                timezone:
+                  type: string
+                  description: IANA timezone name, e.g. `Asia/Colombo`. Must be one of `GET /timezones`. The dashboard pre-selects the tenant's.
                 template_capacity: { type: integer }
       responses:
         '201': { description: Adopted. }
@@ -315,6 +345,11 @@ paths:
               properties:
                 name: { type: string, maxLength: 120 }
                 location: { type: [string, 'null'], maxLength: 160 }
+                timezone:
+                  type: string
+                  description: |
+                    IANA timezone name, e.g. `Asia/Colombo`. Must be one of `GET /timezones`. Optional on an edit, but it cannot be cleared:
+                    `null` or `""` is a 422.
                 status: { type: string, enum: [provisioned, active, suspended, retired] }
                 template_capacity: { type: integer, minimum: 1, maximum: 1000 }
       responses:
@@ -833,10 +868,11 @@ paths:
           application/json:
             schema:
               type: object
-              required: [name]
+              required: [name, timezone]
               properties:
                 name: { type: string, maxLength: 120 }
                 slug: { type: string, maxLength: 60, pattern: '^[A-Za-z0-9_-]+$' }
+                timezone: { type: string, description: 'IANA timezone name, e.g. `Asia/Colombo`. Must be one of `GET /timezones`.' }
                 settings: { $ref: '#/components/schemas/TenantSettings' }
       responses:
         '201':
@@ -885,6 +921,11 @@ paths:
               properties:
                 name: { type: string, maxLength: 120 }
                 status: { type: string, enum: [active, suspended] }
+                timezone:
+                  type: string
+                  description: |
+                    IANA timezone name, e.g. `Asia/Colombo`. Must be one of `GET /timezones`. Optional on an edit, but it cannot be cleared:
+                    `null` or `""` is a 422.
                 settings: { $ref: '#/components/schemas/TenantSettings' }
       responses:
         '200':
@@ -985,6 +1026,17 @@ components:
         device_id: { type: string }
         name: { type: string }
         location: { type: [string, 'null'] }
+        timezone:
+          type: [string, 'null']
+          description: |
+            IANA name. Null only for a device created before timezones existed
+            and not edited since; `tenant.timezone` is the suggested default.
+        tenant:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            timezone: { type: [string, 'null'] }
         status:
           type: string
           enum: [provisioned, active, suspended, retired]
@@ -1183,6 +1235,9 @@ components:
         name: { type: string }
         slug: { type: string }
         status: { type: string, enum: [active, suspended] }
+        timezone:
+          type: [string, 'null']
+          description: IANA name. Null only for a tenant created before timezones existed and not edited since.
         settings: { $ref: '#/components/schemas/TenantSettings' }
         devices_count: { type: integer }
         members_count: { type: integer }

@@ -42,6 +42,7 @@ class DemoTenantSeeder extends Seeder
             [
                 'name' => 'Demo Facility',
                 'status' => 'active',
+                'timezone' => 'Asia/Colombo',
                 'settings' => [
                     'backup_codes' => ['online_verification_only' => false],
                     'otp' => ['require_enrollment' => false],
@@ -110,6 +111,7 @@ class DemoTenantSeeder extends Seeder
             [
                 'name' => $name,
                 'location' => $location,
+                'timezone' => 'Asia/Colombo',
                 'status' => DeviceStatus::Active,
                 'firmware_version' => '1.4.2',
                 'template_capacity' => 200,

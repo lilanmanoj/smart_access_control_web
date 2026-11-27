@@ -22,6 +22,7 @@ class TenantFactory extends Factory
             'name' => $name,
             'slug' => Str::slug($name).'-'.Str::lower(Str::random(4)),
             'status' => 'active',
+            'timezone' => 'Asia/Colombo',
             'settings' => [],
         ];
     }

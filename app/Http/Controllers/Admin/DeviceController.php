@@ -97,6 +97,8 @@ class DeviceController extends Controller
                 ],
                 'name' => ['required', 'string', 'max:120'],
                 'location' => ['nullable', 'string', 'max:160'],
+                // IANA name. The dashboard pre-selects the tenant's.
+                'timezone' => ['required', 'string', 'timezone:all'],
                 'template_capacity' => ['nullable', 'integer', 'min:1', 'max:1000'],
                 // Only honoured for an operator holding `tenant.manage`; see
                 // ResolvesTargetTenant.
@@ -131,6 +133,9 @@ class DeviceController extends Controller
         $validated = $request->validate([
             'name' => ['sometimes', 'string', 'max:120'],
             'location' => ['sometimes', 'nullable', 'string', 'max:160'],
+            // Optional on an edit (Activate sends only `status`), but never
+            // clearable once set.
+            'timezone' => ['sometimes', 'required', 'string', 'timezone:all'],
             'status' => ['sometimes', Rule::in(DeviceStatus::values())],
             'template_capacity' => ['sometimes', 'integer', 'min:1', 'max:1000'],
         ]);

@@ -32,7 +32,7 @@ class TenantManagementTest extends TestCase
     {
         $this->actingAsSuperAdmin();
 
-        $this->postJson('/api/admin/v1/tenants', ['name' => 'Acme Warehouse'])
+        $this->postJson('/api/admin/v1/tenants', ['name' => 'Acme Warehouse', 'timezone' => 'Asia/Colombo'])
             ->assertCreated()
             ->assertJsonPath('data.name', 'Acme Warehouse')
             ->assertJsonPath('data.slug', 'acme-warehouse')
@@ -49,11 +49,11 @@ class TenantManagementTest extends TestCase
         Tenant::factory()->create(['slug' => 'acme-warehouse']);
         $this->actingAsSuperAdmin();
 
-        $this->postJson('/api/admin/v1/tenants', ['name' => 'Acme Warehouse'])
+        $this->postJson('/api/admin/v1/tenants', ['name' => 'Acme Warehouse', 'timezone' => 'Asia/Colombo'])
             ->assertUnprocessable()
             ->assertJsonValidationErrors('slug', 'error.fields');
 
-        $this->postJson('/api/admin/v1/tenants', ['name' => 'Acme Warehouse', 'slug' => 'acme-north'])
+        $this->postJson('/api/admin/v1/tenants', ['name' => 'Acme Warehouse', 'slug' => 'acme-north', 'timezone' => 'Asia/Colombo'])
             ->assertCreated()
             ->assertJsonPath('data.slug', 'acme-north');
     }
@@ -65,11 +65,13 @@ class TenantManagementTest extends TestCase
 
         $this->postJson('/api/admin/v1/tenants', [
             'name' => 'Acme',
+            'timezone' => 'Asia/Colombo',
             'settings' => ['anything' => ['goes' => true]],
         ])->assertUnprocessable()->assertJsonValidationErrors('settings', 'error.fields');
 
         $this->postJson('/api/admin/v1/tenants', [
             'name' => 'Acme',
+            'timezone' => 'Asia/Colombo',
             'settings' => ['otp' => ['require_enrollment' => true]],
         ])->assertCreated()->assertJsonPath('data.settings', ['otp' => ['require_enrollment' => true]]);
     }
@@ -171,7 +173,7 @@ class TenantManagementTest extends TestCase
         $this->actingAsOperator('tenant_admin', $tenant);
 
         $this->adminGet('/tenants')->assertForbidden();
-        $this->postJson('/api/admin/v1/tenants', ['name' => 'Sneaky'])->assertForbidden();
+        $this->postJson('/api/admin/v1/tenants', ['name' => 'Sneaky', 'timezone' => 'Asia/Colombo'])->assertForbidden();
         $this->patchJson("/api/admin/v1/tenants/{$other->uuid}", ['status' => 'suspended'])->assertForbidden();
 
         $this->assertSame('active', $other->fresh()->status);
