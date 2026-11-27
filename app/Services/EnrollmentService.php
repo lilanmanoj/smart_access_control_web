@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Services;
 
-use App\Enums\DeviceCommandType;
 use App\Enums\EnrollmentStatus;
 use App\Enums\MemberStatus;
 use App\Exceptions\ApiException;
@@ -23,10 +22,10 @@ use InvalidArgumentException;
  * The device writes a fingerprint template into its own sensor flash and then
  * tells the backend which slot it used. Since device API 1.1.0 the panel also
  * sends the backend a copy, and since 1.2.0 panels pull the template set back
- * (`GET /fingerprint-templates`) and delete every slot it does not list. So
- * withdrawing a member now takes effect at each panel's next template sync;
- * the `delete_enrollment` command is still queued for older firmware, but 1.2
- * firmware does not execute it.
+ * (`GET /fingerprint-templates`) and delete every slot it does not list. Since
+ * 1.4.0 every change here asks the tenant's panels to run that sync at once
+ * ({@see TemplateSyncTrigger}), so a withdrawal reaches the sensors in seconds;
+ * `delete_enrollment` is no longer queued.
  *
  * Every enrolment that holds a slot owns it in the per-device assignments
  * ({@see TemplateSlotService}); the Enrollment model keeps that in step.
@@ -34,9 +33,9 @@ use InvalidArgumentException;
 class EnrollmentService
 {
     public function __construct(
-        private readonly DeviceCommandService $commands,
         private readonly FingerprintTemplateService $templates,
         private readonly TemplateSlotService $slots,
+        private readonly TemplateSyncTrigger $sync,
     ) {}
 
     /**
@@ -84,6 +83,10 @@ class EnrollmentService
             }
 
             $this->syncEnrolledCount($device);
+
+            // Other panels may need this finger. The enrolling panel already
+            // holds it.
+            $this->sync->tenantChanged((int) $device->tenant_id, except: $device);
 
             return $enrollment->setRelation('member', $member);
         });
@@ -151,18 +154,21 @@ class EnrollmentService
 
             $this->syncEnrolledCount($device);
 
+            $this->sync->tenantChanged((int) $device->tenant_id, except: $device);
+
             return $enrollment->setRelation('member', $member);
         });
     }
 
     /**
-     * Withdraw an enrolment and tell the device to erase the template.
+     * Withdraw an enrolment and have the tenant's panels drop it.
      *
      * The enrolment gives up its slot on our side immediately; its assignment
-     * goes to `releasing`, so the panel deletes the template at its next
-     * template sync and the slot is reused only once a sync report shows it
-     * empty. Until then the finger still opens the door. The erase command is
-     * queued as well, for firmware that predates the sync.
+     * goes to `releasing`, and the slot is reused only once a sync report
+     * shows it empty. Every active panel is asked to sync now, so the finger
+     * stops opening the door within seconds rather than at the next scheduled
+     * sync. Our stored copy of the template is erased at once: nothing lists a
+     * revoked enrolment, so nothing will ever need it again.
      */
     public function revoke(Enrollment $enrollment, ?User $revokedBy = null): Enrollment
     {
@@ -179,18 +185,14 @@ class EnrollmentService
             ])->save();
 
             if ($slot !== null) {
-                $this->commands->queue(
-                    $enrollment->device,
-                    DeviceCommandType::DeleteEnrollment,
-                    ['fingerprint_slot' => $slot],
-                    $revokedBy,
-                    // Erasures are not time-sensitive the way an unlock is, and
-                    // a panel that was offline for an hour must still get them.
-                    ttlSeconds: 86400,
-                );
+                // Covers the slot's superseded copies too, and never a
+                // template a live enrolment holds.
+                $this->templates->eraseSlot($enrollment->device, $slot);
             }
 
             $this->syncEnrolledCount($enrollment->device);
+
+            $this->sync->tenantChanged((int) $enrollment->tenant_id, by: $revokedBy);
 
             return $enrollment;
         });

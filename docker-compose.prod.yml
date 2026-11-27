@@ -91,6 +91,30 @@ services:
       app:
         condition: service_healthy
 
+  # Mosquitto — the panels' MQTT doorbell (device API 1.4.0). Optional, and
+  # only useful where the host lets you open TCP 1883 to the internet, which
+  # Apache cannot proxy: start it with `--profile mqtt`, set MQTT_ENABLED=true
+  # and MQTT_PUBLIC_HOST in .env, then run `php artisan mqtt:bootstrap` once.
+  # Without it, panels poll /health exactly as before.
+  mosquitto:
+    profiles: ["mqtt"]
+    image: eclipse-mosquitto:2.0.20
+    entrypoint: ["sh", "/docker-entrypoint-sac.sh"]
+    env_file: .env
+    ports:
+      - "${MQTT_HOST_PORT:-1883}:1883"
+    volumes:
+      - ./docker/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./docker/mosquitto/entrypoint.sh:/docker-entrypoint-sac.sh:ro
+      - mosquitto-data:/mosquitto/data
+    mem_limit: 64m
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # Redis stays inside the stack: shared hosts rarely provide one, and the
   # queue and Reverb both need it.
   redis:
@@ -116,3 +140,4 @@ services:
 volumes:
   app-storage:
   redis-data:
+  mosquitto-data:

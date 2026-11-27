@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
+use App\Services\Realtime\DeviceRealtime;
 use App\Support\DeviceContext;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -20,10 +21,15 @@ use Illuminate\Http\Request;
  * *about* a device it already trusts, it does not create trust. Self-service
  * enrolment of unknown hardware into a tenant is not something an access
  * control system should offer.
+ *
+ * Safe to call repeatedly. It updates only the fields sent — a panel whose
+ * sensor has not answered omits template_capacity and enrolled_count, and the
+ * stored values stand — and, from device API 1.4.0, rotates the panel's MQTT
+ * password. It writes no audit entry, queues no command and moves no slot.
  */
 class DeviceRegistrationController extends Controller
 {
-    public function store(Request $request, DeviceContext $context): JsonResponse
+    public function store(Request $request, DeviceContext $context, DeviceRealtime $realtime): JsonResponse
     {
         $validated = $request->validate([
             'firmware_version' => ['nullable', 'string', 'max:32'],
@@ -42,7 +48,7 @@ class DeviceRegistrationController extends Controller
             'last_seen_at' => now(),
         ], fn ($value): bool => $value !== null))->save();
 
-        return response()->json([
+        $response = [
             'device' => [
                 'id' => $device->uuid,
                 'device_id' => $device->device_id,
@@ -61,6 +67,19 @@ class DeviceRegistrationController extends Controller
                     config('access.backup_codes.online_verification_only')
                 ),
             ],
-        ], 201);
+        ];
+
+        // Device API 1.4.0: the MQTT doorbell login. A fresh password on every
+        // call, so each one exists in exactly this response; issuing it
+        // disconnects any session still using the previous one. Absent when
+        // the doorbell is off or the broker is unreachable — the panel then
+        // keeps to /health polling and asks again at its next registration.
+        $credentials = $realtime->issueCredentials($device);
+
+        if ($credentials !== null) {
+            $response['realtime'] = $credentials;
+        }
+
+        return response()->json($response, 201)->header('Cache-Control', 'no-store');
     }
 }

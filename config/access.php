@@ -118,8 +118,28 @@ return [
         // fire at an arbitrary later date. A stale `unlock` is a security bug.
         'command_ttl_seconds' => (int) env('DEVICE_COMMAND_TTL_SECONDS', 300),
 
+        // An unlock opens a door, so it lives for two health intervals at most:
+        // long enough to survive one missed poll, short enough that it can
+        // never open the door for somebody who has already walked away.
+        'unlock_ttl_seconds' => (int) env('DEVICE_UNLOCK_TTL_SECONDS', 60),
+
+        // A sync_templates may wait for the panel to be idle. If it expires
+        // the panel's own scheduled sync still covers the change.
+        'sync_templates_ttl_seconds' => (int) env('DEVICE_SYNC_TEMPLATES_TTL_SECONDS', 1800),
+
         // How many commands one /device-commands poll may return.
         'command_poll_limit' => 10,
+
+        // The panel reads at most 4096 bytes of a /health or /device-commands
+        // body. Commands are added to a response only while their encoded size
+        // stays inside this budget; the envelope (status, server_time, device
+        // identity) is bounded well below the remainder. Anything that does
+        // not fit waits for the next poll — unlocks are listed first, so they
+        // always fit.
+        'command_response_budget_bytes' => 3000,
+
+        // The largest device-facing command payload, encoded, in bytes.
+        'command_payload_max_bytes' => 256,
     ],
 
     /*
@@ -205,7 +225,65 @@ return [
         // Shared by the template-sync page fetches and its report. A full
         // 1024-slot sensor at the panel's page size of 8 is 128 pages.
         'template_sync' => (int) env('RATE_LIMIT_TEMPLATE_SYNC', 180),
+        // The doorbell fetch. A panel merges doorbells to one fetch every few
+        // seconds, so this only bites a panel that is misbehaving.
+        'device_commands' => (int) env('RATE_LIMIT_DEVICE_COMMANDS', 30),
+        // Per HOUR, not per minute: a panel registers once per boot and once
+        // more each time the broker rejects its login.
+        'registrations_per_hour' => (int) env('RATE_LIMIT_REGISTRATIONS_PER_HOUR', 10),
         'default' => (int) env('RATE_LIMIT_DEVICE_DEFAULT', 60),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | MQTT doorbell (device API 1.4.0)
+    |--------------------------------------------------------------------------
+    |
+    | A panel cannot be pushed to over HTTPS, so it polls /health every 30s.
+    | With this enabled the backend also rings a doorbell on an MQTT broker
+    | (Mosquitto with its dynamic-security plugin) whenever it queues a command
+    | for a panel; the panel then fetches GET /device-commands at once.
+    |
+    | The doorbell carries no data and no authority. Every command is still
+    | fetched and acknowledged over the authenticated HTTPS API, so a forged or
+    | replayed doorbell can only cause one extra authenticated poll, and with
+    | the broker down everything still arrives through /health.
+    |
+    | Two addresses, because they differ in production: `host`/`port` is how
+    | the backend reaches the broker (the internal Docker network); the
+    | `public_*` pair is what panels are told to connect to. With no public
+    | host the doorbell stays off for panels even if `enabled` is true.
+    |
+    */
+
+    'mqtt' => [
+        'enabled' => (bool) env('MQTT_ENABLED', false),
+
+        'host' => env('MQTT_HOST', 'mosquitto'),
+        'port' => (int) env('MQTT_PORT', 1883),
+
+        // The dynamic-security admin. It manages panel logins and, once
+        // `php artisan mqtt:bootstrap` has run, may also publish doorbells.
+        // It never leaves the Docker network.
+        'username' => env('MQTT_ADMIN_USERNAME', 'sa-backend'),
+        'password' => env('MQTT_ADMIN_PASSWORD'),
+
+        'public_host' => env('MQTT_PUBLIC_HOST'),
+        'public_port' => (int) env('MQTT_PUBLIC_PORT', 1883),
+
+        // Offered to panels in the `realtime` object.
+        'keepalive_seconds' => (int) env('MQTT_DEVICE_KEEPALIVE', 60),
+
+        'topic_prefix' => 'sa/v1/dev',
+
+        // Connect and read timeouts for the backend's own connections. Kept
+        // short: a doorbell is published inside the dashboard request.
+        'timeout_seconds' => 1,
+        'control_timeout_seconds' => 3,
+
+        // After a failure the backend stops trying for this long, so a dead
+        // broker costs one timeout per window rather than one per command.
+        'backoff_seconds' => 30,
     ],
 
     /*

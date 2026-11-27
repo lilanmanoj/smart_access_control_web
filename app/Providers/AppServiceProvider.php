@@ -26,6 +26,8 @@ use App\Policies\MemberPolicy;
 use App\Policies\TenantPolicy;
 use App\Policies\UserPolicy;
 use App\Policies\WebhookEndpointPolicy;
+use App\Services\Realtime\Broker;
+use App\Services\Realtime\MosquittoBroker;
 use App\Services\Sms\HttpSmsGateway;
 use App\Services\Sms\LogSmsGateway;
 use App\Services\Sms\NullSmsGateway;
@@ -63,6 +65,8 @@ class AppServiceProvider extends ServiceProvider
         // One tenant and one device per request, unambiguously.
         $this->app->singleton(TenantContext::class);
         $this->app->singleton(DeviceContext::class);
+
+        $this->app->bind(Broker::class, MosquittoBroker::class);
 
         $this->app->bind(SmsGateway::class, fn (): SmsGateway => match (config('access.sms.driver')) {
             'http' => new HttpSmsGateway,
@@ -114,6 +118,7 @@ class AppServiceProvider extends ServiceProvider
             'device-backup-codes' => 'backup_code_attempts',
             'device-access-events' => 'access_events',
             'device-template-sync' => 'template_sync',
+            'device-commands' => 'device_commands',
         ];
 
         foreach ($limits as $name => $configKey) {
@@ -123,6 +128,12 @@ class AppServiceProvider extends ServiceProvider
                 return Limit::perMinute($perMinute)->by($this->deviceLimiterKey($request));
             });
         }
+
+        // Registration is per hour: once per boot, plus once each time the
+        // broker rejects the panel's MQTT login (device API 1.4.0).
+        RateLimiter::for('device-registrations', fn (Request $request): Limit => Limit::perHour(
+            (int) config('access.rate_limits.registrations_per_hour', 10)
+        )->by($this->deviceLimiterKey($request)));
     }
 
     private function deviceLimiterKey(Request $request): string

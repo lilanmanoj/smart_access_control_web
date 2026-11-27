@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature\Admin;
 
 use App\Enums\DeviceCommandType;
+use App\Enums\DeviceStatus;
 use App\Models\Device;
 use App\Models\Enrollment;
 use App\Models\Member;
@@ -63,23 +64,34 @@ class DashboardApiTest extends TestCase
     }
 
     /**
-     * A remote unlock is an operator decision and has to be attributable.
+     * A remote unlock is an operator decision and has to be attributable. The
+     * access log records it when the panel says the door opened, not when the
+     * button was pressed (device API 1.4.0).
      */
     #[Test]
-    public function a_remote_unlock_is_queued_and_attributed(): void
+    public function a_remote_unlock_is_queued_and_attributed_when_the_door_opens(): void
     {
         $tenant = Tenant::factory()->create();
+        ['device' => $device, 'credential' => $credential] = $this->provisionDevice($tenant);
         $user = $this->actingAsOperator('tenant_admin', $tenant);
-        $device = Device::factory()->for($tenant)->create();
 
-        $this->postJson("/api/admin/v1/devices/{$device->uuid}/unlock", ['reason' => 'Courier'])
-            ->assertAccepted();
+        $commandId = $this->postJson("/api/admin/v1/devices/{$device->uuid}/unlock", ['reason' => 'Courier'])
+            ->assertAccepted()
+            ->assertJsonPath('command.type', 'unlock')
+            ->json('command.id');
 
         $this->assertDatabaseHas('device_commands', [
             'device_id' => $device->id,
             'type' => DeviceCommandType::Unlock->value,
             'issued_by' => $user->id,
         ]);
+        $this->assertDatabaseCount('access_events', 0);
+        $this->assertDatabaseHas('audit_logs', ['action' => 'device.unlocked']);
+
+        $this->postJson("/api/v1/device-commands/{$commandId}/acknowledgements",
+            ['status' => 'acked', 'result' => ['opened' => true]],
+            $this->deviceHeaders($device, $credential))
+            ->assertOk();
 
         $this->assertDatabaseHas('access_events', [
             'device_id' => $device->id,
@@ -92,15 +104,17 @@ class DashboardApiTest extends TestCase
 
     /**
      * Revoking an enrolment has to reach the sensor, or the member is
-     * withdrawn on paper and their finger still opens the door.
+     * withdrawn on paper and their finger still opens the door. Since 1.4.0
+     * every active panel in the tenant is asked to sync at once.
      */
     #[Test]
-    public function revoking_an_enrollment_queues_a_template_erase(): void
+    public function revoking_an_enrollment_asks_the_tenants_panels_to_sync(): void
     {
         $tenant = Tenant::factory()->create();
         $this->actingAsOperator('device_manager', $tenant);
 
-        $device = Device::factory()->for($tenant)->create();
+        $device = Device::factory()->for($tenant)->create(['status' => DeviceStatus::Active]);
+        $other = Device::factory()->for($tenant)->create(['status' => DeviceStatus::Active]);
         $enrollment = Enrollment::factory()->create([
             'tenant_id' => $tenant->id,
             'device_id' => $device->id,
@@ -110,13 +124,13 @@ class DashboardApiTest extends TestCase
 
         $this->deleteJson("/api/admin/v1/enrollments/{$enrollment->uuid}")->assertOk();
 
-        $this->assertDatabaseHas('device_commands', [
-            'device_id' => $device->id,
-            'type' => DeviceCommandType::DeleteEnrollment->value,
-        ]);
-
-        $command = \App\Models\DeviceCommand::withoutGlobalScopes()->latest('id')->firstOrFail();
-        $this->assertSame(9, $command->payload['fingerprint_slot']);
+        foreach ([$device, $other] as $panel) {
+            $this->assertDatabaseHas('device_commands', [
+                'device_id' => $panel->id,
+                'type' => DeviceCommandType::SyncTemplates->value,
+            ]);
+        }
+        $this->assertDatabaseMissing('device_commands', ['type' => DeviceCommandType::DeleteEnrollment->value]);
 
         // The slot is freed on our side immediately so it can be re-enrolled.
         $this->assertNull($enrollment->fresh()->fingerprint_slot);

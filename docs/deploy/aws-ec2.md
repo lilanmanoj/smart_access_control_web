@@ -30,10 +30,15 @@ Internet
 │                    └── everything   ──▶ app     :80           │
 │                                          (nginx + PHP-FPM)    │
 │                                                               │
+│  mosquitto :1883  ◀── panels' MQTT doorbell (plain TCP)       │
+│       ▲                                                       │
+│       └──────── app publishes doorbells, manages logins       │
+│                                                               │
 │  queue        scheduler        redis        mysql             │
 │                                                               │
 └───────────────────────────────────────────────────────────────┘
-        all seven containers from one image pulled from ECR
+   the application roles from one image pulled from ECR; caddy,
+   mosquitto, redis and mysql from their official images
 ```
 
 Compare that with the shared-hosting layout in the README: the same four
@@ -86,7 +91,7 @@ changing `DB_HOST`.
 | **ECR** repository | Holds the image CI builds. |
 | **EC2** `t4g.small`, Amazon Linux 2023 arm64 | Runs everything. |
 | **Elastic IP** | The static public address you asked for — and what your domain will point at later. |
-| **Security group** | Inbound 80 and 443 only. No SSH port. |
+| **Security group** | Inbound 80 and 443, plus 1883 for the panels' MQTT doorbell (device API 1.4.0; see Part 12). No SSH port. |
 | **IAM instance profile** | Pull from ECR, read the config parameter, write backups, accept SSM commands. |
 | **SSM Parameter Store** SecureString | The entire `.env`. One place, encrypted, survives the instance. |
 | **S3** bucket | Nightly database dumps, expired on a lifecycle rule. |
@@ -112,8 +117,9 @@ the image's defaults.
 | `scheduler` (one PHP process, plus what it spawns) | ~120 MB |
 | `reverb` (one long-lived PHP process) | ~90 MB |
 | Caddy | ~30 MB |
+| Mosquitto (MQTT doorbell, `mem_limit: 64m`) | ~5 MB |
 | OS, dockerd, containerd, SSM agent | ~300 MB |
-| **Total** | **~1.65 GB of 1.9 GB usable** |
+| **Total** | **~1.66 GB of 1.9 GB usable** |
 
 Three things make that work, and all three are in the committed configuration:
 
@@ -286,6 +292,7 @@ export DB_ROOT_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1
 export REVERB_APP_ID=$(shuf -i 100000-999999 -n 1)
 export REVERB_APP_KEY=$(openssl rand -hex 16)
 export REVERB_APP_SECRET=$(openssl rand -hex 32)
+export MQTT_ADMIN_PASSWORD=$(openssl rand -hex 32)
 ```
 
 > `tr -dc 'A-Za-z0-9'` is not fussiness. A `$` in a database password is read as
@@ -427,6 +434,20 @@ EVENT_RETENTION_DAYS=365
 
 ACCESS_SCHEDULES_ENFORCE=true
 ACCESS_SCHEDULE_TIMEZONE=Asia/Colombo
+
+# -----------------------------------------------------------------------------
+# MQTT doorbell (device API 1.4.0) — Part 12. The mosquitto container reads
+# MQTT_ADMIN_* from this same file on its first boot.
+# -----------------------------------------------------------------------------
+MQTT_ENABLED=true
+MQTT_HOST=mosquitto
+MQTT_PORT=1883
+MQTT_ADMIN_USERNAME=sa-backend
+MQTT_ADMIN_PASSWORD=$MQTT_ADMIN_PASSWORD
+MQTT_PUBLIC_HOST=$PUBLIC_IP
+MQTT_PUBLIC_PORT=1883
+MQTT_DEVICE_KEEPALIVE=60
+DEVICE_UNLOCK_TTL_SECONDS=60
 EOF
 
 aws ssm put-parameter \
@@ -602,17 +623,22 @@ export SUBNET_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_I
 
 export SG_ID=$(aws ec2 create-security-group \
   --group-name "$PROJECT-sg" \
-  --description "Smart Access Control - public web only" \
+  --description "Smart Access Control - web and MQTT doorbell" \
   --vpc-id "$VPC_ID" --query 'GroupId' --output text)
 
 aws ec2 authorize-security-group-ingress --group-id "$SG_ID" \
   --ip-permissions \
     'IpProtocol=tcp,FromPort=80,ToPort=80,IpRanges=[{CidrIp=0.0.0.0/0,Description="HTTP"}]' \
     'IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=0.0.0.0/0,Description="HTTPS"}]' \
-    'IpProtocol=udp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=0.0.0.0/0,Description="HTTP/3"}]'
+    'IpProtocol=udp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=0.0.0.0/0,Description="HTTP/3"}]' \
+    'IpProtocol=tcp,FromPort=1883,ToPort=1883,IpRanges=[{CidrIp=0.0.0.0/0,Description="MQTT doorbell (panels)"}]'
 
 echo "$VPC_ID $SUBNET_ID $SG_ID"
 ```
+
+Port 1883 is the panels' MQTT doorbell (Part 12). It is raw MQTT over TCP,
+which Caddy cannot carry, so Mosquitto publishes it directly. Leave it out if
+you will never switch the doorbell on.
 
 **No port 22.** You get a shell through SSM Session Manager, which works over
 the instance's outbound connection. Nothing listens for inbound SSH, so nothing
@@ -1132,6 +1158,129 @@ Update the firmware's server URL to `https://access.yourdomain.com`. Until this
 point the device API has been carrying `X-Device-Secret` in cleartext, which is
 acceptable for your own testing and not for a device on a wall.
 
+If the doorbell is on, also set `MQTT_PUBLIC_HOST=access.yourdomain.com` and
+redeploy; panels pick up the new host at their next registration. The doorbell
+stays plain TCP on 1883 either way. Keep the hostname **DNS-only**: a CDN or
+proxy in front of the domain carries HTTPS but not raw MQTT.
+
+---
+
+## Part 12 — The MQTT doorbell (device API 1.4.0)
+
+Without it a panel learns about a command — a remote unlock, a suspended
+member — at its next `/health` poll, up to 30 seconds later, and a fingerprint
+change reaches it at its next template sync, hours later. With it, the backend
+rings the panel's doorbell on an MQTT broker the moment it queues a command,
+and the panel fetches it over HTTPS at once: about one to two seconds for a
+remote unlock, seconds for a suspended member's finger to stop working.
+
+The doorbell carries no data and no authority. Every command is still fetched
+and acknowledged over the authenticated HTTPS device API, so a forged doorbell
+can only cause an extra authenticated poll, and with the broker down panels
+simply keep polling `/health`. That is why it can run over plain TCP.
+
+A fresh install following this guide already has everything below. For an
+instance that predates it:
+
+### 12.1 Open the port
+
+```sh
+aws ec2 authorize-security-group-ingress --group-id "$SG_ID" \
+  --ip-permissions 'IpProtocol=tcp,FromPort=1883,ToPort=1883,IpRanges=[{CidrIp=0.0.0.0/0,Description="MQTT doorbell (panels)"}]'
+```
+
+### 12.2 Add the settings to the parameter
+
+Fetch, edit and write back the parameter (Part 4.2's recipe), adding:
+
+```sh
+MQTT_ENABLED=true
+MQTT_HOST=mosquitto
+MQTT_PORT=1883
+MQTT_ADMIN_USERNAME=sa-backend
+MQTT_ADMIN_PASSWORD=<openssl rand -hex 32>
+MQTT_PUBLIC_HOST=<the Elastic IP, or your hostname after Part 11>
+MQTT_PUBLIC_PORT=1883
+MQTT_DEVICE_KEEPALIVE=60
+DEVICE_UNLOCK_TTL_SECONDS=60
+```
+
+`MQTT_PUBLIC_HOST` is what panels are told to connect to; `MQTT_HOST` is how
+the backend reaches the broker on the internal network. Leave
+`MQTT_PUBLIC_HOST` empty and the doorbell stays off for panels.
+
+### 12.3 Deploy
+
+Merge to `prod` (or run the deploy workflow) as usual. `deploy.sh`:
+
+1. writes the new `.env`;
+2. `up -d` creates the `mosquitto` container — on its first boot it creates
+   its admin login from `MQTT_ADMIN_USERNAME` / `MQTT_ADMIN_PASSWORD` — and
+   recreates the application roles with the new code (the `app` container
+   runs the new migration);
+3. runs `php artisan mqtt:bootstrap`, which lets the backend publish doorbells
+   and pins the broker's default access to deny. It is idempotent and runs on
+   every deploy while `MQTT_ENABLED=true`.
+
+Deploy the backend **before** panels with doorbell firmware are installed.
+Older panels are unaffected either way.
+
+### 12.4 Check it
+
+```sh
+dc ps mosquitto                                   # Up (healthy)
+dc logs --tail 20 mosquitto                       # "mosquitto version 2.0.20 running"
+dc exec -e HOME=/tmp app php artisan mqtt:bootstrap   # ok / "expected on a re-run"
+sudo docker stats --no-stream | grep mosquitto    # a few MB
+```
+
+From outside, confirm the port is reachable (any machine with the Mosquitto
+clients; a refusal proves the port is open, a timeout means it is not):
+
+```sh
+mosquitto_sub -h <MQTT_PUBLIC_HOST> -p 1883 -t test -u nobody -P wrong -C 1 -W 5
+# Connection error: Connection Refused: not authorised.   <- good
+```
+
+Once a panel with doorbell firmware has registered, its device page shows
+**Realtime: Connected**, and:
+
+```sh
+dc exec -e HOME=/tmp app php artisan devices:test-command <device_id> --doorbell
+dc exec -e HOME=/tmp app php artisan devices:test-command <device_id> unlock
+```
+
+should open the door within a couple of seconds.
+
+### 12.5 Operating it
+
+* **Nothing to back up.** Panel logins live in the `mosquitto-data` volume, but
+  every registration re-issues them. If the volume is lost, the broker's first
+  boot recreates the admin login, the next deploy (or `mqtt:bootstrap`)
+  restores the publish permission, and each panel re-registers within the hour
+  when the broker refuses its old login.
+* **Rotating the broker admin password.** The broker set it on its first boot
+  and does not re-read `.env`. Either change it on the broker and then in the
+  parameter:
+
+  ```sh
+  dc exec mosquitto mosquitto_ctrl -u sa-backend -P '<old>' dynsec setClientPassword sa-backend '<new>'
+  # then MQTT_ADMIN_PASSWORD=<new> in the parameter, and redeploy
+  ```
+
+  or set the new value in the parameter, `dc stop mosquitto && sudo docker
+  volume rm smart-access-control_mosquitto-data`, and redeploy; panels
+  re-register within the hour.
+* **A stolen panel login** shows in `dc logs mosquitto` as the same client id
+  connecting from two addresses ("already connected, closing old connection")
+  over and over, and as a climbing reconnect count on the device page. The
+  impact is a lost doorbell (the panel falls back to polling); the fix is to
+  have the panel register again, which issues a new password.
+* **Deactivating a door** in the dashboard disconnects it from the broker and
+  disables its login; reactivating restores it.
+* **Connection limit:** `max_connections 1000` in
+  [docker/mosquitto/mosquitto.conf](../../docker/mosquitto/mosquitto.conf).
+
 ---
 
 ## Running it day to day
@@ -1155,16 +1304,20 @@ alias dc='sudo docker compose --env-file compose.env -f docker-compose.aws.yml'
 | Restart one role | `dc restart queue` |
 | MySQL shell | `dc exec mysql sh -c 'mysql -u root -p"$MYSQL_ROOT_PASSWORD" smart_access'` |
 | Backup now | `sudo systemctl start smart-access-backup.service` |
+| MQTT broker log | `dc logs -f --tail 100 mosquitto` |
+| Test command to one panel | `dc exec -e HOME=/tmp app php artisan devices:test-command SMA_4821 unlock` |
+| Bare doorbell to one panel | `dc exec -e HOME=/tmp app php artisan devices:test-command SMA_4821 --doorbell` |
 
 One piece of housekeeping the pipeline deliberately does not do: `deploy.sh`
-pulls only the application image, so `caddy`, `mysql` and `redis` stay at
-whatever patch version was first pulled. That is the right default — you do not
+pulls only the application image, so `caddy`, `mosquitto`, `mysql` and `redis`
+stay at whatever version was first pulled (Mosquitto is pinned to a tag in the
+compose file; change the tag to upgrade it). That is the right default — you do not
 want an unannounced MySQL minor upgrade in the middle of a code deploy — but it
 does mean doing it yourself now and then, after a backup:
 
 ```sh
 sudo systemctl start smart-access-backup.service
-dc pull caddy redis mysql && dc up -d
+dc pull caddy mosquitto redis mysql && dc up -d
 ```
 
 ## Troubleshooting
