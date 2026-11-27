@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace App\Events;
 
+use App\Listeners\RingDeviceDoorbell;
 use App\Models\DeviceCommand;
 use Illuminate\Broadcasting\InteractsWithSockets;
 use Illuminate\Broadcasting\PrivateChannel;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
+use Illuminate\Contracts\Events\ShouldDispatchAfterCommit;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
@@ -16,9 +18,15 @@ use Illuminate\Queue\SerializesModels;
  *
  * Broadcast so the device detail screen can show the pending queue — an
  * operator who has just revoked a fingerprint needs to see that the erase has
- * not reached the door yet.
+ * not reached the door yet. It also rings the panel's MQTT doorbell
+ * ({@see RingDeviceDoorbell}).
+ *
+ * Dispatched only once the surrounding transaction commits. A revoke queues
+ * its command inside a transaction; a doorbell rung before the commit would
+ * send the panel to fetch a row it cannot see yet, and the queued broadcast
+ * could not load the command it describes.
  */
-class DeviceCommandQueued implements ShouldBroadcast
+class DeviceCommandQueued implements ShouldBroadcast, ShouldDispatchAfterCommit
 {
     use Dispatchable;
     use InteractsWithSockets;

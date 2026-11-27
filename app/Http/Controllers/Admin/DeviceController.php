@@ -4,9 +4,6 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Admin;
 
-use App\Enums\AccessMethod;
-use App\Enums\AccessResult;
-use App\Enums\DenialReason;
 use App\Enums\DeviceCommandStatus;
 use App\Enums\DeviceCommandType;
 use App\Enums\DeviceStatus;
@@ -17,10 +14,10 @@ use App\Http\Resources\DeviceCommandResource;
 use App\Http\Resources\DeviceResource;
 use App\Models\BackupCodeSet;
 use App\Models\Device;
-use App\Services\AccessEventRecorder;
 use App\Services\AuditLogger;
 use App\Services\BackupCodeService;
 use App\Services\DeviceCommandService;
+use App\Services\Realtime\DeviceRealtime;
 use App\Support\TenantContext;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -35,7 +32,7 @@ class DeviceController extends Controller
     public function __construct(
         private readonly DeviceCommandService $commands,
         private readonly BackupCodeService $backupCodes,
-        private readonly AccessEventRecorder $events,
+        private readonly DeviceRealtime $realtime,
         private readonly AuditLogger $audit,
     ) {}
 
@@ -142,6 +139,17 @@ class DeviceController extends Controller
 
         $this->audit->log('device.updated', $device, $before, $device->getAttributes());
 
+        // A deactivated door is refused by the API; shut it out of the MQTT
+        // broker as well, which also ends its live session. Reactivating turns
+        // the same login back on: a panel that registered earlier in this boot
+        // does not register again, and would otherwise wait for its hourly
+        // retry before its doorbell worked.
+        if ($device->wasChanged('status')) {
+            $device->status === DeviceStatus::Active
+                ? $this->realtime->restoreCredentials($device)
+                : $this->realtime->revokeCredentials($device);
+        }
+
         return new DeviceResource($device);
     }
 
@@ -158,43 +166,41 @@ class DeviceController extends Controller
 
         $this->audit->log('device.deleted', $device, $before);
 
+        $this->realtime->revokeCredentials($device);
+
         return response()->json(['ok' => true]);
     }
 
     /**
      * POST /devices/{device}/unlock — remote unlock.
      *
-     * Queued as a device command and recorded as an access event with
-     * `method: remote` and the acting operator, so an out-of-hours door
-     * opening is attributable to a person rather than appearing from nowhere.
+     * Queued as a device command. The access event — `method: remote`, the
+     * acting operator — is written when the panel acknowledges that the door
+     * opened (device API 1.4.0), so an unlock that expires or is refused never
+     * appears in the log as an opening. The request itself is audited now.
      */
     public function unlock(Request $request, Device $device): JsonResponse
     {
         $this->authorize('unlock', $device);
 
+        // Kept on the command for the dashboard and audit trail; never sent
+        // to the panel.
+        $reason = $request->string('reason')->limit(120)->toString();
+
         $command = $this->commands->queue(
             $device,
             DeviceCommandType::Unlock,
-            ['reason' => $request->string('reason')->limit(120)->toString()],
+            $reason === '' ? [] : ['reason' => $reason],
             $request->user(),
         );
-
-        $this->events->record($device, [
-            'method' => AccessMethod::Remote,
-            'result' => AccessResult::Granted,
-            'reason' => DenialReason::RemoteUnlock,
-            'actor_user_id' => $request->user()->id,
-            'metadata' => ['command_id' => $command->uuid],
-        ]);
 
         $this->audit->log('device.unlocked', $device, after: ['command_id' => $command->uuid]);
 
         return response()->json([
             'command' => new DeviceCommandResource($command),
-            // The door does not open until the panel collects this on its next
-            // poll — up to one health interval away. Saying so here keeps the
-            // dashboard honest about what just happened.
-            'note' => 'Queued. The device will act on it at its next poll.',
+            'note' => 'Queued. The door opens when the panel collects it: within a few seconds '.
+                'when its realtime connection is up, otherwise at its next health poll, about '.
+                '30 seconds at most. The request expires at expires_at if the panel never collects it.',
         ], 202);
     }
 

@@ -9,6 +9,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\TenantResource;
 use App\Models\Tenant;
 use App\Services\AuditLogger;
+use App\Services\TemplateSyncTrigger;
 use App\Support\TenantContext;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -29,6 +30,7 @@ class TenantController extends Controller
     public function __construct(
         private readonly AuditLogger $audit,
         private readonly TenantContext $tenants,
+        private readonly TemplateSyncTrigger $sync,
     ) {}
 
     /**
@@ -136,6 +138,7 @@ class TenantController extends Controller
         }
 
         $before = $tenant->getAttributes();
+        $approvalWasRequired = $tenant->requiresMemberApproval();
 
         $changes = Arr::only($validated, ['name', 'status']);
 
@@ -146,6 +149,12 @@ class TenantController extends Controller
         $tenant->update($changes);
 
         $this->audit->log('tenant.updated', $tenant, $before, $tenant->getAttributes());
+
+        // Turning approval on or off changes which members' fingers reach
+        // panels they did not enrol at.
+        if ($approvalWasRequired !== $tenant->requiresMemberApproval()) {
+            $this->sync->tenantChanged((int) $tenant->id, by: $request->user());
+        }
 
         return new TenantResource($tenant->loadCount(['devices', 'members', 'users']));
     }

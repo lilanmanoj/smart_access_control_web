@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Smart Access Control — Dashboard API
-  version: 1.2.0
+  version: 1.3.0
   summary: The API behind the React operator dashboard.
   description: |
     Cookie-based Sanctum session auth for a first-party SPA served from the
@@ -337,12 +337,19 @@ paths:
       operationId: unlockDevice
       summary: Unlock remotely
       description: |
-        Requires `device.unlock`. Queued as a device command and recorded as an
-        access event with `method: remote` and the acting operator, so an
-        out-of-hours door opening is attributable to a person.
+        Requires `device.unlock`. Queued as a device command that lives 60
+        seconds and is delivered to the panel at most once. The request is
+        audited at once (`device.unlocked`); the access event (`method:
+        remote`, the acting operator) is written when the panel acknowledges
+        that the door opened, so an unlock that expires or is refused never
+        appears in the access log as an opening.
 
-        The door does not open until the panel collects the command on its next
-        poll — up to one health interval away.
+        The door opens when the panel collects the command: within seconds
+        when its MQTT doorbell is connected (device API 1.4.0), otherwise at
+        its next health poll, about 30 seconds at most. Follow the command
+        returned here on `GET /device-commands` until it is `acked` (opened),
+        `failed` (`result.error`: `busy`, `expired`, `unsupported`, …) or
+        `expired`. `reason` stays on the server and is never sent to the panel.
       requestBody:
         content:
           application/json:
@@ -353,6 +360,20 @@ paths:
       responses:
         '202':
           description: Queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  command:
+                    type: object
+                    description: The queued command, as `GET /device-commands` lists it.
+                    properties:
+                      id: { type: string, format: uuid }
+                      type: { type: string, const: unlock }
+                      status: { type: string, enum: [pending, sent, acked, failed, expired] }
+                      expires_at: { type: string, format: date-time }
+                  note: { type: string }
         '403': { $ref: '#/components/responses/Forbidden' }
 
   /devices/{device}/backup-codes/rotations:
@@ -973,6 +994,16 @@ components:
           description: |
             Whether the panel is answering right now. Independent of `status` —
             a suspended device can be online, and an active one can be dark.
+        realtime:
+          type: object
+          description: |
+            The panel's MQTT doorbell (device API 1.4.0), as it last reported
+            it on /health. `connected` is null until a panel that has a
+            doorbell reports at all.
+          properties:
+            connected: { type: [boolean, 'null'] }
+            reconnects: { type: [integer, 'null'], description: Since the panel's last boot. }
+            reported_at: { type: [string, 'null'], format: date-time }
         firmware_version: { type: [string, 'null'] }
         last_health_at: { type: [string, 'null'], format: date-time }
         template_capacity: { type: integer }

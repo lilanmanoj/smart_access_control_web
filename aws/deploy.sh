@@ -126,5 +126,19 @@ else
         || log "NOTE: caddy did not answer on :80 yet"
 fi
 
+# ---------------------------------------------------------------------------
+# 5. MQTT doorbell (device API 1.4.0). Idempotent: lets the backend publish
+#    doorbells on the broker. Advisory, like the Caddy check: with the broker
+#    down panels simply keep polling /health, which is no reason to fail a
+#    deploy whose application is healthy.
+# ---------------------------------------------------------------------------
+if grep -qE '^MQTT_ENABLED=(true|1)\b' "$APP_DIR/.env"; then
+    if "${COMPOSE[@]}" exec -T app php artisan mqtt:bootstrap; then
+        log "mqtt broker ready"
+    else
+        log "NOTE: mqtt:bootstrap failed — panels stay on /health polling. Check: ${COMPOSE[*]} logs mosquitto"
+    fi
+fi
+
 docker image prune -af --filter 'until=72h' >/dev/null 2>&1 || true
 log "deployed ${SHA}"
