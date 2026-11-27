@@ -8,16 +8,21 @@ use App\Models\Device;
 use App\Models\DeviceCredential;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Services\Realtime\Broker;
 use App\Support\DeviceContext;
 use App\Support\TenantContext;
 use Database\Seeders\RolesAndPermissionsSeeder;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
 use Illuminate\Testing\TestResponse;
+use Tests\Fakes\FakeBroker;
 
 abstract class TestCase extends BaseTestCase
 {
     /** The plaintext secret used by {@see actingAsDevice}. */
     protected const DEVICE_SECRET = 'test-device-secret-value-000000000000000000';
+
+    /** Stands in for Mosquitto in every test. */
+    protected FakeBroker $broker;
 
     protected function setUp(): void
     {
@@ -28,6 +33,20 @@ abstract class TestCase extends BaseTestCase
         // clean and each test binds it explicitly where it matters.
         app(TenantContext::class)->forget();
         app(DeviceContext::class)->forget();
+
+        // No test may open a socket to a broker, even with MQTT switched on.
+        $this->broker = new FakeBroker;
+        $this->app->instance(Broker::class, $this->broker);
+    }
+
+    /** Switch the MQTT doorbell on, against the fake broker. */
+    protected function enableMqtt(): void
+    {
+        config([
+            'access.mqtt.enabled' => true,
+            'access.mqtt.public_host' => 'mqtt.example.com',
+            'access.mqtt.password' => 'test-admin-password',
+        ]);
     }
 
     /**

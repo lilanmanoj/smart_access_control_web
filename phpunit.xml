@@ -43,6 +43,8 @@
         <server name="BROADCAST_CONNECTION" value="null" force="true"/>
         <server name="CACHE_STORE" value="array" force="true"/>
         <server name="QUEUE_CONNECTION" value="sync" force="true"/>
+        <!-- Never reach a real MQTT broker; tests that need one bind a fake. -->
+        <server name="MQTT_ENABLED" value="false" force="true"/>
         <server name="SESSION_DRIVER" value="array" force="true"/>
         <server name="MAIL_MAILER" value="array" force="true"/>
 

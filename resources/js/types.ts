@@ -61,6 +61,15 @@ export interface Device {
     status: DeviceStatus;
     /** Whether it is inside its health-poll window right now. */
     is_online: boolean;
+    /**
+     * The MQTT doorbell as the panel last reported it on /health (device API
+     * 1.4.0). `connected` is null until a panel that knows about it reports.
+     */
+    realtime?: {
+        connected: boolean | null;
+        reconnects: number | null;
+        reported_at: string | null;
+    };
     firmware_version: string | null;
     last_seen_at: string | null;
     last_health_at: string | null;

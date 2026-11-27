@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
 import { api, ensureCsrfCookie, toApiError } from '@/lib/api';
@@ -24,7 +24,7 @@ import {
     Td,
     Th,
 } from '@/components/ui';
-import type { Device, Enrollment, Paginated, TemplateSync } from '@/types';
+import type { Device, DeviceCommand, Enrollment, Paginated, TemplateSync } from '@/types';
 
 /**
  * One door: its state, who is enrolled on it, what is queued for it, and the
@@ -35,6 +35,7 @@ export function DeviceDetailPage() {
     const { can } = useAuth();
     const queryClient = useQueryClient();
     const [issuedCodes, setIssuedCodes] = useState<string[] | null>(null);
+    const [unlockCommandId, setUnlockCommandId] = useState<string | null>(null);
     const [issuedCredential, setIssuedCredential] = useState<{
         device_id: string;
         api_key: string;
@@ -71,9 +72,16 @@ export function DeviceDetailPage() {
     const unlock = useMutation({
         mutationFn: async () => {
             await ensureCsrfCookie();
-            await api.post(`/devices/${deviceId}/unlock`, { reason: 'Dashboard remote unlock' });
+            const { data } = await api.post<{ command: DeviceCommand }>(`/devices/${deviceId}/unlock`, {
+                reason: 'Dashboard remote unlock',
+            });
+
+            return data.command;
         },
-        onSuccess: invalidate,
+        onSuccess: (command) => {
+            setUnlockCommandId(command.id);
+            invalidate();
+        },
     });
 
     const rotateCodes = useMutation({
@@ -239,16 +247,12 @@ export function DeviceDetailPage() {
                 </p>
             )}
 
-            {unlock.isSuccess && (
-                <p
-                    role="status"
-                    className="panel px-4 py-2 text-xs"
-                    style={{ borderColor: 'var(--warn)', color: 'var(--warn-text)' }}
-                >
-                    Unlock queued. The panel cannot be pushed to, so it opens at its next health
-                    poll — up to about 30 seconds away. It is already recorded in the access log
-                    against your name.
-                </p>
+            {unlockCommandId && (
+                <UnlockProgress
+                    deviceId={deviceId}
+                    commandId={unlockCommandId}
+                    onDismiss={() => setUnlockCommandId(null)}
+                />
             )}
 
             {/* Shown once, and nowhere else afterwards. */}
@@ -307,6 +311,7 @@ export function DeviceDetailPage() {
                         <Row label="Last health poll" value={formatRelative(device.last_health_at)} />
                         <Row label="Last seen" value={formatDateTime(device.last_seen_at)} />
                         <Row label="Firmware" value={device.firmware_version ?? 'Unknown'} />
+                        <Row label="Realtime" value={<RealtimeState device={device} />} />
                         <Row
                             label="Templates stored"
                             value={`${device.enrolled_count} of ${device.template_capacity}`}
@@ -383,7 +388,7 @@ export function DeviceDetailPage() {
 
                 <Panel
                     title="Queued commands"
-                    description="Nothing reaches a panel until it polls"
+                    description="Delivered at the panel's next poll, or within seconds over its realtime connection"
                     className="p-4"
                 >
                     {pending.length === 0 ? (
@@ -705,7 +710,122 @@ function downloadCodes(deviceName: string, codes: string[]): void {
     URL.revokeObjectURL(url);
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+/**
+ * Follows one remote unlock from the button to the door: waiting, then opened
+ * or did not open, as the panel acknowledges it (device API 1.4.0). The access
+ * log records the opening only once the panel confirms it.
+ */
+function UnlockProgress({
+    deviceId,
+    commandId,
+    onDismiss,
+}: {
+    deviceId: string;
+    commandId: string;
+    onDismiss: () => void;
+}) {
+    const commandQuery = useQuery({
+        queryKey: ['device-command', commandId],
+        queryFn: async () => {
+            const { data } = await api.get<Paginated<DeviceCommand>>('/device-commands', {
+                params: { device_id: deviceId, per_page: 25 },
+            });
+
+            return data.data.find((command) => command.id === commandId) ?? null;
+        },
+        refetchInterval: (query) => {
+            const command = query.state.data;
+
+            return command && ['acked', 'failed', 'expired'].includes(command.status) ? false : 2_000;
+        },
+    });
+
+    const command = commandQuery.data;
+    const expired =
+        command?.status === 'expired' ||
+        (command?.expires_at != null &&
+            ['pending', 'sent'].includes(command.status) &&
+            Date.parse(command.expires_at) < Date.now());
+
+    let state: ReactNode;
+
+    if (command?.status === 'acked') {
+        state = (
+            <Badge tone="ok" glyph="✓">
+                Door opened
+            </Badge>
+        );
+    } else if (command?.status === 'failed') {
+        state = (
+            <Badge tone="danger" glyph="✕">
+                Did not open: {unlockFailureLabel(command.result)}
+            </Badge>
+        );
+    } else if (expired) {
+        state = (
+            <Badge tone="neutral" glyph="—">
+                Did not open: the door did not collect it in time
+            </Badge>
+        );
+    } else {
+        state = (
+            <Badge tone="warn" glyph="◔">
+                Waiting for the door…
+            </Badge>
+        );
+    }
+
+    return (
+        <div role="status" className="panel flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-xs">
+            <span className="flex flex-wrap items-center gap-2">
+                <span>Remote unlock</span>
+                {state}
+            </span>
+            <button type="button" className="underline underline-offset-2" onClick={onDismiss}>
+                Dismiss
+            </button>
+        </div>
+    );
+}
+
+function unlockFailureLabel(result: Record<string, unknown> | null): string {
+    switch (result?.error) {
+        case 'busy':
+            return 'the panel was busy';
+        case 'expired':
+            return 'the request expired before the panel could act';
+        case 'unsupported':
+            return 'this panel cannot unlock remotely';
+        default:
+            return typeof result?.error === 'string' ? humanise(result.error) : 'no reason given';
+    }
+}
+
+/** The MQTT doorbell, as the panel last reported it. */
+function RealtimeState({ device }: { device: Device }) {
+    const realtime = device.realtime;
+
+    if (realtime?.connected == null) {
+        return <span>Not reported</span>;
+    }
+
+    const reconnects =
+        realtime.reconnects == null
+            ? ''
+            : ` · ${realtime.reconnects} reconnect${realtime.reconnects === 1 ? '' : 's'}`;
+
+    return realtime.connected ? (
+        <Badge tone="ok" glyph="●">
+            Connected{reconnects}
+        </Badge>
+    ) : (
+        <Badge tone="warn" glyph="○">
+            Not connected{reconnects}
+        </Badge>
+    );
+}
+
+function Row({ label, value }: { label: string; value: ReactNode }) {
     return (
         <div className="flex items-baseline justify-between gap-3">
             <dt style={{ color: 'var(--text-muted)' }}>{label}</dt>

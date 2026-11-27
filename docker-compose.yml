@@ -169,6 +169,26 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
+  # Mosquitto — the MQTT doorbell broker (device API 1.4.0). Panels on the LAN
+  # connect to <your-ip>:1883; the backend reaches it as mosquitto:1883. Off
+  # unless MQTT_ENABLED=true in .env; then run `php artisan mqtt:bootstrap`
+  # once. The admin defaults match .env.example so a bare clone works.
+  # ---------------------------------------------------------------------------
+  mosquitto:
+    image: eclipse-mosquitto:2.0.20
+    entrypoint: ["sh", "/docker-entrypoint-sac.sh"]
+    environment:
+      MQTT_ADMIN_USERNAME: ${MQTT_ADMIN_USERNAME:-sa-backend}
+      MQTT_ADMIN_PASSWORD: ${MQTT_ADMIN_PASSWORD:-local-mqtt-admin-password}
+    ports:
+      - "${MQTT_HOST_PORT:-1883}:1883"
+    volumes:
+      - ./docker/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./docker/mosquitto/entrypoint.sh:/docker-entrypoint-sac.sh:ro
+      - mosquitto-data:/mosquitto/data
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
   # Mailpit — catches the OTP and invitation e-mails locally.
   # http://localhost:8025
   # ---------------------------------------------------------------------------
@@ -183,3 +203,4 @@ volumes:
   mysql-data:
   redis-data:
   composer-cache:
+  mosquitto-data:

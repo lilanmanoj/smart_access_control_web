@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Smart Access Control — Device API
-  version: 1.3.0
+  version: 1.4.0
   summary: The contract between an ESP32-S3 access panel and the backend.
   description: |
     Every path here is appended directly to the device's configured
@@ -89,6 +89,89 @@ info:
       endpoint must not be deployed against a pre-1.3.0 backend, which would
       rotate the set on every poll.
 
+    ### Additions in 1.4.0 (backwards compatible): the MQTT doorbell
+
+    A panel can now be told to fetch its commands at once instead of at its
+    next `/health` poll. Everything below is optional for a panel: one that
+    ignores it keeps working exactly as on 1.3.0.
+
+    * **The doorbell.** `POST /device-registrations` returns a `realtime`
+      object (when the backend has it switched on) with a broker login for
+      this panel. The panel keeps one MQTT connection to that broker and
+      subscribes to its own topic. Whenever the backend queues a command for
+      the panel it publishes a tiny message there; the panel then calls
+      `GET /device-commands`. See **The MQTT doorbell** below.
+    * **Commands carry their lifetime.** Every command object has
+      `expires_in` (whole seconds left when the response was produced) and
+      `expires_at`. Decide expiry with `expires_in`, measured on the panel's
+      own uptime clock from when the response arrived; `expires_at` is
+      informational, because the panel's wall clock is only as good as the
+      last `server_time` it saw.
+    * **An unlock is delivered at most once**, across `/health` and
+      `/device-commands` together, and lives 60 seconds. Every other command is
+      offered again on every poll until it is acknowledged. Unlocks are listed
+      first.
+    * **`sync_templates`** — a new command: run one template-sync pass now.
+      Queued whenever something changes what panels should hold (a member
+      suspended, reactivated, approved or deleted; an enrolment made or
+      revoked), so the change reaches the sensor in seconds. A revoke no
+      longer queues `delete_enrollment`, which is **deprecated**.
+    * **Acknowledgements are idempotent.** The first final acknowledgement of
+      a command wins; repeats answer the same 200 and change nothing, so a
+      panel may retry freely. Result shapes and error codes are listed on the
+      acknowledgement endpoint.
+    * **Remote unlock is logged on acknowledgement.** The backend records the
+      access event when the panel acknowledges `{"opened": true}`; the panel
+      sends no `/access-events` entry for a remote unlock.
+    * **Size guarantees.** A `/health` or `/device-commands` body is never
+      larger than 4096 bytes: commands that would not fit wait for the next
+      poll. A command's `payload` is at most 256 bytes encoded.
+    * **Rate limits answer with `Retry-After`** (seconds) on every device
+      route, alongside `X-RateLimit-Limit` and `X-RateLimit-Remaining`.
+      `GET /device-commands` is limited to 30 per minute and
+      `POST /device-registrations` to 10 per hour, per device.
+    * **`/health` reports the doorbell:** `mqtt=1|0` and `mqtt_reconnects`.
+    * **No sensor yet?** Leave `template_capacity` and `enrolled_count` out of
+      `POST /device-registrations` (or send `null`); the stored values stand.
+      A `0` is refused there, and ignored on `/health`.
+
+    ### The MQTT doorbell
+
+    The doorbell carries **no data and no authority**. A message on the topic
+    means only "fetch your commands now"; the command itself is always fetched
+    and acknowledged over this authenticated HTTPS API. A forged, replayed or
+    lost doorbell can therefore at most cause, or miss, one extra poll, and
+    with the broker unreachable every command still arrives through `/health`.
+
+    | | |
+    |---|---|
+    | Transport | MQTT 3.1.1 or 5 over plain TCP, `host`:`port` from the `realtime` object (1883 by default). |
+    | Login | `username`, `password` and `client_id` from the `realtime` object, used verbatim. The broker accepts the login only with that exact client id. |
+    | Subscription | `topic` from the `realtime` object, QoS 0, clean session. It is the only topic the login may subscribe to; it may publish nothing. |
+    | Message | Any message on the topic means "call `GET /device-commands` now". The payload is currently `{"v":1}` and should be ignored; it is never longer than 256 bytes and never retained. |
+    | Keepalive | `keepalive` seconds from the `realtime` object (60). |
+
+    Rules for the panel:
+
+    1. **Fetch once after every successful (re)subscribe.** Doorbells published
+       while the panel was disconnected are not queued for it.
+    2. **Merge doorbells.** At most one fetch in flight and at most one every
+       few seconds; a burst of doorbells needs only one fetch.
+    3. **A new password with every registration.** Each
+       `POST /device-registrations` issues a fresh password and the previous
+       one stops working at once: the broker disconnects any session still
+       using it. Reconnect with the new login straight after registering.
+    4. **Login refused** (bad credentials / not authorised): the login was
+       rotated, disabled or lost. Register again — at most once an hour — and
+       reconnect with what comes back. Until then, poll `/health` as usual.
+    5. **No `realtime` object** in the registration response: the doorbell is
+       off or the broker is unreachable. Stay on `/health` polling and look
+       again at the next registration.
+    6. **One connection per login.** A second connection with the same client
+       id takes over the session and the broker closes the first.
+    7. **Deactivated or deleted panels** are disconnected and their login is
+       disabled. A reactivated panel's existing login works again.
+
   contact:
     name: Smart Access Control
   license:
@@ -141,11 +224,20 @@ paths:
 
         The firmware requires **both** a 200 and `"status": "ok"` exactly.
         Extra fields are ignored by older builds.
+
+        **Commands (1.4.0).** The same commands `GET /device-commands` serves,
+        through the same collection: an unlock handed out here is never handed
+        out there, and vice versa. Unlocks first, then the rest in queue
+        order, at most 10, and never so many that the body exceeds 4096 bytes.
+        Run what this response delivers; there is no need to fetch
+        `/device-commands` for it.
       parameters:
         - { $ref: '#/components/parameters/FirmwareVersion' }
         - { $ref: '#/components/parameters/UptimeMs' }
         - { $ref: '#/components/parameters/EnrolledCount' }
         - { $ref: '#/components/parameters/TemplateCapacity' }
+        - { $ref: '#/components/parameters/MqttConnected' }
+        - { $ref: '#/components/parameters/MqttReconnects' }
       responses:
         '200':
           description: The backend is reachable.
@@ -168,7 +260,17 @@ paths:
                   commands:
                     type: array
                     description: Queued commands, collected by this poll.
+                    maxItems: 10
                     items: { $ref: '#/components/schemas/Command' }
+              example:
+                status: ok
+                server_time: '2026-11-27T21:10:07Z'
+                device: { id: 01a21ed7-2b15-70b5-bfdf-f6ef0618aca8, device_id: SMA_7001, name: Front Door }
+                commands:
+                  - { id: 01a21ed8-0ff3-7018-9eed-13b3753dc6b6, type: unlock, payload: {}, expires_at: '2026-11-27T21:11:06Z', expires_in: 59 }
+                  - { id: 01a21ed8-0982-701f-b2b0-1e51d42d3aaf, type: sync_templates, payload: {}, expires_at: '2026-11-27T21:40:04Z', expires_in: 1797 }
+                  - { id: 01a21ed8-0b9b-70e1-b494-21f89cf73add, type: refresh_backup_codes, payload: {}, expires_at: '2026-11-27T21:15:04Z', expires_in: 297 }
+                  - { id: 01a21ed8-0dea-7016-a739-f9679accf161, type: report_inventory, payload: {}, expires_at: '2026-11-27T22:10:05Z', expires_in: 3598 }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '429': { $ref: '#/components/responses/RateLimited' }
@@ -768,12 +870,21 @@ paths:
       operationId: collectDeviceCommands
       summary: Collect queued commands
       description: |
-        The panel cannot receive pushes, so it polls. Commands also ride along
-        on the health response; this endpoint exists for firmware that would
-        rather fetch them separately.
+        What the panel fetches when its MQTT doorbell rings (1.4.0), and once
+        after every successful MQTT (re)subscribe. No query parameters.
+
+        Commands also ride along on the health response, through the same
+        collection: an unlock is delivered **at most once** across the two
+        endpoints, and every other command is offered again on every poll —
+        either endpoint — until it is acknowledged. De-duplicate by `id`.
+        Unlocks first, then queue order; at most 10, and never so many that
+        the body exceeds 4096 bytes.
 
         Collecting a command marks it `sent`, not `acked` — until the device
-        confirms, the backend does not claim the template was actually erased.
+        confirms, the backend does not claim the door opened.
+
+        Limited to 30 requests per minute per device; a 429 carries
+        `Retry-After`.
       responses:
         '200':
           description: Outstanding commands.
@@ -781,16 +892,49 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [commands]
                 properties:
                   commands:
                     type: array
+                    maxItems: 10
                     items: { $ref: '#/components/schemas/Command' }
+              example:
+                commands:
+                  - { id: 01a21ed8-0982-701f-b2b0-1e51d42d3aaf, type: sync_templates, payload: {}, expires_at: '2026-11-27T21:40:04Z', expires_in: 1797 }
+                  - { id: 01a21ed8-0b9b-70e1-b494-21f89cf73add, type: refresh_backup_codes, payload: {}, expires_at: '2026-11-27T21:15:04Z', expires_in: 297 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /device-commands/{commandId}/acknowledgements:
     post:
       tags: [Commands]
       operationId: acknowledgeDeviceCommand
       summary: Confirm a command was carried out
+      description: |
+        Every command the panel receives gets exactly one final answer here:
+        `acked` when it was carried out, `failed` (with `result.error`) when it
+        was not — including types the panel does not support.
+
+        **Idempotent (1.4.0).** The first final acknowledgement wins and runs
+        its effects (logging a remote unlock, reconciling an inventory). A
+        repeat — a retry after a timeout, or a re-offered command answered
+        again — returns the same 200 and changes nothing. An acknowledgement
+        that arrives after the command expired is still accepted: an unlock
+        acknowledged late did open the door.
+
+        | `type` | `acked` result | `failed` `result.error` |
+        |---|---|---|
+        | `unlock` | `{"opened": true}` — the backend writes the access event (`method: remote`) now. | `busy` (the lock was not energised), `expired`, `unsupported` |
+        | `sync_templates` | `{"status": "unchanged"}` or `{"status": "complete" \| "partial", "written": n, "deleted": n}` — after the pass finishes | `sync_failed`, `not_idle`, `sensor_unavailable` |
+        | `delete_enrollment` (deprecated) | `{"deleted": true, "via": "sync_templates"}` | `still_listed`, `sync_failed`, `sensor_error`, `sensor_unavailable`, `invalid_payload` |
+        | `refresh_backup_codes` | `{"refreshed": true}` — after the fetch | `fetch_failed` |
+        | `report_inventory` | `{"occupied_slots": [0, 1, 4, 7]}` — up to 1024 entries | `sensor_unavailable` |
+        | anything else | — | `unsupported` |
+
+        Any command may also fail with `out_of_memory`. `result.error` is a
+        free string of at most 64 characters, so a panel may send a code not
+        listed here; the backend stores it and shows it to operators.
       parameters:
         - name: commandId
           in: path
@@ -807,25 +951,39 @@ paths:
                 status: { type: string, enum: [acked, failed] }
                 result:
                   type: object
+                  maxProperties: 20
                   description: |
-                    Free-form. A `report_inventory` acknowledgement carries
-                    `occupied_slots`, which the backend reconciles against its
-                    own records.
+                    Per type, as in the table above. A `report_inventory`
+                    acknowledgement carries `occupied_slots`, which the backend
+                    reconciles against its own records.
+                  properties:
+                    error: { type: string, maxLength: 64 }
+                    occupied_slots:
+                      type: array
+                      maxItems: 1024
+                      items: { type: integer, minimum: 0, maximum: 65535 }
                   additionalProperties: true
                   examples:
-                    - { deleted: true }
+                    - { opened: true }
+                    - { status: complete, written: 2, deleted: 1 }
                     - { occupied_slots: [0, 1, 4, 7] }
+                    - { error: busy }
       responses:
         '200':
-          description: Acknowledged.
+          description: Acknowledged — the first time, or again (no effect).
           content:
             application/json:
               schema:
                 type: object
                 properties:
                   acknowledged: { type: boolean, const: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404':
-          description: No such command for this device.
+          description: |
+            No such command for this device. Final: do not retry.
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
 
   # ==========================================================================
   /device-registrations:
@@ -841,23 +999,47 @@ paths:
         *about* a device it already trusts, it does not create trust.
         Self-service enrolment of unknown hardware is not something an access
         control system should offer.
+
+        **Safe to call again** (1.4.0) — once per boot, and once more whenever
+        the MQTT broker refuses the panel's login (at most once an hour). It
+        updates only the fields sent and `last_seen_at`, and issues a new
+        MQTT password; it writes no audit entry, queues no command and moves
+        no slot. Limited to 10 per hour per device.
+
+        **No sensor detected?** Leave `template_capacity` and `enrolled_count`
+        out, or send `null`; the stored values stand. Sending a capacity
+        changes the panel's template set, so send the sensor's real value once
+        it has answered.
       requestBody:
         content:
           application/json:
             schema:
               type: object
               properties:
-                firmware_version: { type: string, examples: ['1.4.2'] }
-                template_capacity: { type: integer, examples: [200] }
-                enrolled_count: { type: integer, examples: [12] }
-                metadata: { type: object, additionalProperties: true }
+                firmware_version: { type: string, maxLength: 32, examples: ['1.4.0'] }
+                template_capacity:
+                  type: [integer, 'null']
+                  minimum: 1
+                  maximum: 1000
+                  description: Omit (or null) until the sensor has reported it.
+                  examples: [200]
+                enrolled_count:
+                  type: [integer, 'null']
+                  minimum: 0
+                  maximum: 1000
+                  description: Omit (or null) until the sensor has reported it.
+                  examples: [12]
+                metadata: { type: object, maxProperties: 20, additionalProperties: true }
       responses:
         '201':
-          description: Registered.
+          description: |
+            Registered. Sent with `Cache-Control: no-store`: it may carry a
+            password.
           content:
             application/json:
               schema:
                 type: object
+                required: [device, server_time, settings]
                 properties:
                   device: { $ref: '#/components/schemas/DeviceIdentity' }
                   server_time: { type: string, format: date-time }
@@ -866,6 +1048,25 @@ paths:
                     properties:
                       otp_ttl_seconds: { type: integer }
                       backup_codes_online_only: { type: boolean }
+                  realtime:
+                    $ref: '#/components/schemas/RealtimeLogin'
+              example:
+                device: { id: 01a21ed7-2b15-70b5-bfdf-f6ef0618aca8, device_id: SMA_7001, name: Front Door, location: Lobby, status: active, template_capacity: 200 }
+                server_time: '2026-11-27T21:09:15Z'
+                settings: { otp_ttl_seconds: 90, backup_codes_online_only: false }
+                realtime:
+                  protocol: mqtt
+                  host: mqtt.example.com
+                  port: 1883
+                  username: dev-01a21ed7-2b15-70b5-bfdf-f6ef0618aca8
+                  password: '<32 characters, shown once>'
+                  client_id: 01a21ed7-2b15-70b5-bfdf-f6ef0618aca8
+                  topic: sa/v1/dev/01a21ed7-2b15-70b5-bfdf-f6ef0618aca8/notify
+                  keepalive: 60
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   # ==========================================================================
   /fingerprint-templates:
@@ -1167,12 +1368,30 @@ components:
       name: enrolled_count
       in: query
       required: false
+      description: Omit until the sensor has reported it; 0 is ignored.
       schema: { type: integer, minimum: 0 }
     TemplateCapacity:
       name: template_capacity
       in: query
       required: false
-      schema: { type: integer, minimum: 1 }
+      description: Omit, or send 0, until the sensor has reported it; 0 is ignored.
+      schema: { type: integer, minimum: 0 }
+    MqttConnected:
+      name: mqtt
+      in: query
+      required: false
+      description: |
+        1.4.0. Whether the panel's MQTT doorbell connection is up right now.
+        Shown on the dashboard; omit if the panel has no doorbell.
+      schema: { type: integer, enum: [0, 1] }
+    MqttReconnects:
+      name: mqtt_reconnects
+      in: query
+      required: false
+      description: |
+        1.4.0. MQTT reconnections since boot. A count that keeps climbing on a
+        healthy network is how a contested login shows up.
+      schema: { type: integer, minimum: 0 }
 
   schemas:
     DeviceIdClaim:
@@ -1452,22 +1671,76 @@ components:
 
     Command:
       type: object
+      required: [id, type, payload]
       properties:
-        id: { type: string, format: uuid }
+        id:
+          type: string
+          format: uuid
+          description: Lower-case hex and hyphens, 36 characters. De-duplicate on it.
         type:
           type: string
+          maxLength: 31
+          description: |
+            * `unlock` — open the door for the panel's lock time. Delivered at
+              most once; lives 60 s.
+            * `sync_templates` (1.4.0) — run one template-sync pass now
+              (`GET /fingerprint-templates` + `POST /fingerprint-template-syncs`).
+              Lives 30 min. Several arriving before a pass starts may share it.
+            * `refresh_backup_codes` — fetch `GET /backup-codes` now.
+            * `report_inventory` — report the occupied sensor slots.
+            * `delete_enrollment` — **deprecated in 1.4.0** and no longer
+              queued; one queued earlier may still arrive within 24 h. Handle it
+              with a sync pass, never a direct erase. Payload:
+              `fingerprint_slot`.
+            * `reboot`, `update_settings` — not queued by the backend today.
+
+            New types may appear; acknowledge an unknown one as `failed` with
+            `{"error": "unsupported"}`.
           enum:
-            - delete_enrollment
-            - refresh_backup_codes
             - unlock
+            - sync_templates
+            - refresh_backup_codes
+            - report_inventory
+            - delete_enrollment
             - reboot
             - update_settings
-            - report_inventory
         payload:
           type: object
+          description: At most 256 bytes encoded. `{}` when the type takes none.
           additionalProperties: true
           examples:
+            - {}
             - { fingerprint_slot: 7 }
+        expires_in:
+          type: integer
+          minimum: 0
+          description: |
+            1.4.0. Whole seconds left when the response was produced. Measure
+            it on the panel's own uptime clock from when the response arrived.
+        expires_at:
+          type: string
+          format: date-time
+          description: |
+            1.4.0. The same deadline as a UTC timestamp. Informational: the
+            panel's wall clock may be off by a minute or more.
+
+    RealtimeLogin:
+      type: object
+      description: |
+        1.4.0. This panel's MQTT doorbell login. Present only while the
+        backend has the doorbell switched on and could reach the broker. The
+        password is new on every registration and appears in this response
+        only; the previous one stops working at once. Keep it in memory.
+      required: [protocol, host, port, username, password, client_id, topic, keepalive]
+      properties:
+        protocol: { type: string, enum: [mqtt], description: 'Plain TCP. A future WebSocket fallback would be "ws" and add `path`.' }
+        host: { type: string, maxLength: 253, description: A hostname or IP address. }
+        port: { type: integer, minimum: 1, maximum: 65535, examples: [1883] }
+        username: { type: string, maxLength: 64, description: 'Currently `dev-` and the device UUID: 40 characters.', examples: [dev-01a21ed7-2b15-70b5-bfdf-f6ef0618aca8] }
+        password: { type: string, minLength: 16, maxLength: 64, description: Currently 32 letters and digits. }
+        client_id: { type: string, maxLength: 64, description: 'Use verbatim; the broker accepts the login with this client id only. Currently the device UUID: 36 characters.' }
+        topic: { type: string, maxLength: 128, description: 'The only topic this login may subscribe to. Use verbatim. Currently `sa/v1/dev/<uuid>/notify`: 53 characters.' }
+        keepalive: { type: integer, minimum: 10, maximum: 300, description: Seconds. }
 
     Error:
       type: object
@@ -1541,6 +1814,21 @@ components:
         Per-device limit exceeded. Keyed on the authenticated device rather
         than the IP: a whole site's panels commonly share one public address,
         and one compromised device must not throttle its neighbours.
+
+        Wait `Retry-After` seconds before trying again (1.4.0); if the header
+        is missing, wait 30 seconds.
+      headers:
+        Retry-After:
+          description: Seconds until the limit resets.
+          schema: { type: integer }
+        X-RateLimit-Limit:
+          schema: { type: integer }
+        X-RateLimit-Remaining:
+          schema: { type: integer }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: rate_limited
+              message: Too Many Attempts.

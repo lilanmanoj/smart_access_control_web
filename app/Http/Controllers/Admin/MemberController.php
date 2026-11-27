@@ -9,6 +9,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\MemberResource;
 use App\Models\Member;
 use App\Services\AuditLogger;
+use App\Services\TemplateSyncTrigger;
 use App\Support\PhoneNumber;
 use App\Support\TenantContext;
 use Illuminate\Http\JsonResponse;
@@ -22,6 +23,7 @@ class MemberController extends Controller
 {
     public function __construct(
         private readonly AuditLogger $audit,
+        private readonly TemplateSyncTrigger $sync,
     ) {}
 
     public function index(Request $request): AnonymousResourceCollection
@@ -89,6 +91,12 @@ class MemberController extends Controller
 
         $this->audit->log('member.updated', $member, $before, $member->getAttributes());
 
+        // Suspending or reactivating changes which fingers every panel in the
+        // tenant should hold; have them sync now rather than in hours.
+        if ($member->wasChanged('status')) {
+            $this->sync->tenantChanged((int) $member->tenant_id, by: $request->user());
+        }
+
         return new MemberResource($member);
     }
 
@@ -111,6 +119,9 @@ class MemberController extends Controller
             $this->audit->log('member.approved', $member, after: [
                 'approved_at' => $member->approved_at?->toIso8601String(),
             ]);
+
+            // An approved member's finger now goes to the tenant's other panels.
+            $this->sync->tenantChanged((int) $member->tenant_id, by: $request->user());
         }
 
         return new MemberResource($member);
@@ -127,6 +138,8 @@ class MemberController extends Controller
         $member->delete();
 
         $this->audit->log('member.deleted', $member, $before);
+
+        $this->sync->tenantChanged((int) $member->tenant_id, by: request()->user());
 
         return response()->json(['ok' => true]);
     }

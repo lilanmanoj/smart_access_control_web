@@ -23,6 +23,14 @@ class DeviceResource extends JsonResource
             // door is currently answering. A suspended device can still be
             // online, and an active one can be dark.
             'is_online' => $this->is_online,
+            // Device API 1.4.0: the MQTT doorbell as the panel last reported
+            // it on /health. `connected` is null until a panel that knows
+            // about the doorbell reports at all.
+            'realtime' => [
+                'connected' => $this->mqtt_connected,
+                'reconnects' => $this->mqtt_reconnects,
+                'reported_at' => $this->mqtt_reported_at?->toIso8601String(),
+            ],
             'firmware_version' => $this->firmware_version,
             'last_seen_at' => $this->last_seen_at?->toIso8601String(),
             'last_health_at' => $this->last_health_at?->toIso8601String(),

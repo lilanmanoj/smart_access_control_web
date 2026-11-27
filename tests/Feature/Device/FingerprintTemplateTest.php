@@ -278,39 +278,53 @@ class FingerprintTemplateTest extends TestCase
         ]);
     }
 
+    /**
+     * Device API 1.4.0: nothing lists a revoked enrolment, so its stored copy
+     * goes at once rather than waiting for the panel to acknowledge an erase.
+     */
     #[Test]
-    public function an_acknowledged_slot_erase_deletes_the_template(): void
+    public function revoking_erases_the_stored_template_at_once(): void
     {
-        $command = $this->enrolAndRevoke(7);
+        $this->enrol(7, $this->template())->assertJsonPath('template_status', 'stored');
 
-        $this->acknowledge($command, 'acked');
+        $this->revokeSlot(7);
 
         $template = FingerprintTemplate::query()->sole();
         $this->assertSame(FingerprintTemplateStatus::Deleted, $template->status);
         $this->assertNull($template->data_encrypted);
         $this->assertNull(DB::table('fingerprint_templates')->value('data_encrypted'));
+
+        // The sensor is reached through a template sync, never a direct erase.
+        $this->assertSame(0, DeviceCommand::query()->where('type', DeviceCommandType::DeleteEnrollment->value)->count());
     }
 
+    /**
+     * A delete_enrollment queued before the upgrade can still be acknowledged
+     * by a 1.4.0 panel. It must never erase a template a live enrolment holds.
+     */
     #[Test]
-    public function a_failed_slot_erase_keeps_the_template(): void
+    public function a_legacy_erase_acknowledgement_never_erases_a_live_template(): void
     {
-        $command = $this->enrolAndRevoke(7);
+        $this->enrol(7, $this->template())->assertJsonPath('template_status', 'stored');
+        $command = $this->legacyEraseCommand(7);
 
-        $this->acknowledge($command, 'failed');
+        $this->acknowledge($command, 'acked');
 
         $this->assertSame(FingerprintTemplateStatus::Active, FingerprintTemplate::query()->sole()->status);
     }
 
     /**
-     * The panel can erase the slot, enrol someone new into it and post that
-     * enrolment before the acknowledgement reaches us. The acknowledgement is
-     * about the old template only.
+     * The panel can sync, enrol someone new into the slot and post that
+     * enrolment before a legacy erase acknowledgement reaches us. The
+     * acknowledgement never touches the new template.
      */
     #[Test]
-    public function a_late_acknowledgement_does_not_erase_the_slots_new_template(): void
+    public function a_late_legacy_acknowledgement_does_not_erase_the_slots_new_template(): void
     {
-        $command = $this->enrolAndRevoke(7);
+        $this->enrol(7, $this->template())->assertJsonPath('template_status', 'stored');
+        $command = $this->legacyEraseCommand(7);
         $old = FingerprintTemplate::query()->sole();
+        $this->revokeSlot(7);
 
         [$bytes, $sha] = $this->otherTemplate();
         $this->enrol(7, $this->template(['data' => base64_encode($bytes), 'sha256' => $sha]));
@@ -360,8 +374,7 @@ class FingerprintTemplateTest extends TestCase
         $this->enrol(7, $this->template(['data' => base64_encode($bytes), 'sha256' => $sha]));
 
         // The erase covers the slot's superseded copy as well as the revoked one.
-        $command = $this->revokeSlot(7);
-        $this->acknowledge($command, 'acked');
+        $this->revokeSlot(7);
 
         $actions = AuditLog::query()->where('action', 'like', 'fingerprint_template.%')->orderBy('id')->get();
 
@@ -480,15 +493,8 @@ class FingerprintTemplateTest extends TestCase
         return [$bytes, hash('sha256', $bytes)];
     }
 
-    private function enrolAndRevoke(int $slot): DeviceCommand
-    {
-        $this->enrol($slot, $this->template())->assertJsonPath('template_status', 'stored');
-
-        return $this->revokeSlot($slot);
-    }
-
-    /** Revoke whoever holds the slot, as the dashboard would, and return the erase command. */
-    private function revokeSlot(int $slot): DeviceCommand
+    /** Revoke whoever holds the slot, as the dashboard would. */
+    private function revokeSlot(int $slot): void
     {
         app(TenantContext::class)->set($this->device->tenant);
 
@@ -501,11 +507,19 @@ class FingerprintTemplateTest extends TestCase
         app(EnrollmentService::class)->revoke($enrollment);
 
         app(TenantContext::class)->forget();
+    }
 
-        return DeviceCommand::query()
-            ->where('type', DeviceCommandType::DeleteEnrollment->value)
-            ->latest('id')
-            ->firstOrFail();
+    /** A delete_enrollment as a pre-1.4.0 backend queued it on revoke. */
+    private function legacyEraseCommand(int $slot): DeviceCommand
+    {
+        app(TenantContext::class)->set($this->device->tenant);
+
+        $command = app(\App\Services\DeviceCommandService::class)
+            ->queue($this->device, DeviceCommandType::DeleteEnrollment, ['fingerprint_slot' => $slot]);
+
+        app(TenantContext::class)->forget();
+
+        return $command;
     }
 
     private function acknowledge(DeviceCommand $command, string $status): void
