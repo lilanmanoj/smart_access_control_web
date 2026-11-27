@@ -8,6 +8,9 @@ use App\Enums\BackupCodeSetStatus;
 use App\Enums\DeviceStatus;
 use App\Models\Concerns\BelongsToTenant;
 use App\Models\Concerns\HasUuid;
+use DateTimeInterface;
+use DateTimeZone;
+use Exception;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -23,7 +26,7 @@ use Illuminate\Database\Eloquent\SoftDeletes;
  * to be checked against the API credential that accompanies it.
  */
 #[Fillable([
-    'tenant_id', 'device_id', 'name', 'location', 'status',
+    'tenant_id', 'device_id', 'name', 'location', 'timezone', 'status',
     'firmware_version', 'template_capacity', 'metadata',
 ])]
 class Device extends Model
@@ -49,6 +52,44 @@ class Device extends Model
             'template_set_total' => 'integer',
             'template_set_served_at' => 'datetime',
         ];
+    }
+
+    /**
+     * The timezone this door is in: its own, or failing that its tenant's.
+     * Null when neither has one (records from before timezones existed).
+     */
+    public function effectiveTimezone(): ?string
+    {
+        return $this->timezone ?? $this->tenant?->timezone;
+    }
+
+    /**
+     * The door's timezone as /health hands it to the panel (device API
+     * 1.5.0): the IANA name and its UTC offset at `$at`, in seconds.
+     *
+     * The offset is computed for the instant of the response, so a daylight-
+     * saving change reaches the panel at its next poll, and the panel needs no
+     * timezone database of its own.
+     *
+     * @return array{name: string, utc_offset_seconds: int}|null
+     */
+    public function timezoneAt(DateTimeInterface $at): ?array
+    {
+        $name = $this->effectiveTimezone();
+
+        if ($name === null) {
+            return null;
+        }
+
+        try {
+            $zone = new DateTimeZone($name);
+        } catch (Exception) {
+            // Validated on every write, so only a hand-edited row lands here;
+            // the panel then simply stays on UTC.
+            return null;
+        }
+
+        return ['name' => $name, 'utc_offset_seconds' => $zone->getOffset($at)];
     }
 
     /** @return HasMany<DeviceCredential, $this> */

@@ -16,7 +16,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  *
  * Tenant itself is not tenant-scoped: it *is* the scope.
  */
-#[Fillable(['name', 'slug', 'status', 'settings'])]
+#[Fillable(['name', 'slug', 'status', 'timezone', 'settings'])]
 class Tenant extends Model
 {
     use HasFactory;

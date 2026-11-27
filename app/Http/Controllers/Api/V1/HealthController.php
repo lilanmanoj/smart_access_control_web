@@ -20,7 +20,8 @@ use Illuminate\Http\Request;
  * things ride along on it:
  *
  *  - `server_time`, because the device has no RTC and its status bar otherwise
- *    reads 1970 (§9.1);
+ *    reads 1970 (§9.1), and since device API 1.5.0 the door's `timezone` with
+ *    its current UTC offset, so the panel can show local time;
  *  - the heartbeat that tells the dashboard a door has gone dark (§9.2);
  *  - any queued commands, so revocation and remote unlock work without the
  *    device having to poll a second endpoint (§9.3). The same commands are
@@ -57,9 +58,16 @@ class HealthController extends Controller
 
         $queued = $commands->collectFor($device);
 
+        // One instant for both, so local time is exactly server_time plus
+        // the offset.
+        $now = now();
+
         return response()->json([
             'status' => 'ok',
-            'server_time' => now()->toIso8601ZuluString(),
+            'server_time' => $now->toIso8601ZuluString(),
+            // Display only: every authoritative timestamp stays the server's.
+            // Left out when neither the device nor its tenant has a timezone.
+            ...array_filter(['timezone' => $device->timezoneAt($now)]),
             'device' => [
                 'id' => $device->uuid,
                 'device_id' => $device->device_id,

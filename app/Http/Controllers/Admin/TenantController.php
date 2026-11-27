@@ -80,6 +80,7 @@ class TenantController extends Controller
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:120'],
             'slug' => ['nullable', 'string', 'max:60', 'alpha_dash'],
+            'timezone' => ['required', 'string', 'timezone:all'],
             ...$this->settingRules(),
         ]);
 
@@ -98,6 +99,7 @@ class TenantController extends Controller
             'name' => $validated['name'],
             'slug' => $slug,
             'status' => 'active',
+            'timezone' => $validated['timezone'],
             'settings' => $this->mergeSettings([], $validated['settings'] ?? []),
         ]);
 
@@ -123,6 +125,9 @@ class TenantController extends Controller
         $validated = $request->validate([
             'name' => ['sometimes', 'string', 'max:120'],
             'status' => ['sometimes', Rule::in(['active', 'suspended'])],
+            // Optional on an edit (activating sends only `status`), but never
+            // clearable: a tenant that has a timezone keeps one.
+            'timezone' => ['sometimes', 'required', 'string', 'timezone:all'],
             ...$this->settingRules(),
         ]);
 
@@ -140,7 +145,7 @@ class TenantController extends Controller
         $before = $tenant->getAttributes();
         $approvalWasRequired = $tenant->requiresMemberApproval();
 
-        $changes = Arr::only($validated, ['name', 'status']);
+        $changes = Arr::only($validated, ['name', 'status', 'timezone']);
 
         if (array_key_exists('settings', $validated)) {
             $changes['settings'] = $this->mergeSettings($tenant->settings ?? [], $validated['settings'] ?? []);

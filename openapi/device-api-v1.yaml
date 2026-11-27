@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Smart Access Control — Device API
-  version: 1.4.0
+  version: 1.5.0
   summary: The contract between an ESP32-S3 access panel and the backend.
   description: |
     Every path here is appended directly to the device's configured
@@ -172,6 +172,22 @@ info:
     7. **Deactivated or deleted panels** are disconnected and their login is
        disabled. A reactivated panel's existing login works again.
 
+    ### Additions in 1.5.0 (backwards compatible): the door's timezone
+
+    * `GET /health` carries `timezone`: the door's IANA timezone name and its
+      UTC offset, in seconds, at the instant of `server_time`. The panel's
+      local time is `server_time` + `utc_offset_seconds`.
+    * It is the device's own timezone, set in the dashboard, or its tenant's
+      when the device has none. It is left out when neither is set; the panel
+      then stays on UTC.
+    * The offset is recomputed for every response, so a daylight-saving change
+      or an operator's edit reaches the panel at its next poll. The panel needs
+      no timezone database and no daylight-saving rules: it keeps the last
+      offset it received, including while offline.
+    * **For display only** — the status-bar clock and on-screen times. The
+      server still assigns every authoritative timestamp, and access events
+      are stamped on receipt as before.
+
   contact:
     name: Smart Access Control
   license:
@@ -217,7 +233,8 @@ paths:
         Three things ride along on it:
 
         * `server_time` — the device has no RTC, so this is its only route to a
-          real clock;
+          real clock — and, since 1.5.0, `timezone`, so it can show local
+          time;
         * the heartbeat that tells the dashboard a door has gone dark;
         * any queued commands, so revocation and remote unlock work without a
           second endpoint.
@@ -255,6 +272,8 @@ paths:
                     type: string
                     format: date-time
                     examples: ['2026-09-06T10:15:00Z']
+                  timezone:
+                    $ref: '#/components/schemas/DeviceTimezone'
                   device:
                     $ref: '#/components/schemas/DeviceIdentity'
                   commands:
@@ -265,6 +284,7 @@ paths:
               example:
                 status: ok
                 server_time: '2026-11-27T21:10:07Z'
+                timezone: { name: Asia/Colombo, utc_offset_seconds: 19800 }
                 device: { id: 01a21ed7-2b15-70b5-bfdf-f6ef0618aca8, device_id: SMA_7001, name: Front Door }
                 commands:
                   - { id: 01a21ed8-0ff3-7018-9eed-13b3753dc6b6, type: unlock, payload: {}, expires_at: '2026-11-27T21:11:06Z', expires_in: 59 }
@@ -1723,6 +1743,29 @@ components:
           description: |
             1.4.0. The same deadline as a UTC timestamp. Informational: the
             panel's wall clock may be off by a minute or more.
+
+    DeviceTimezone:
+      type: object
+      description: |
+        1.5.0. The door's timezone, for showing local time. The device's own,
+        or its tenant's when the device has none; absent when neither is set
+        (stay on UTC). Display only: never use it to stamp an event.
+      required: [name, utc_offset_seconds]
+      properties:
+        name:
+          type: string
+          maxLength: 64
+          description: IANA timezone name.
+          examples: [Asia/Colombo, Europe/London]
+        utc_offset_seconds:
+          type: integer
+          minimum: -50400
+          maximum: 50400
+          description: |
+            Seconds east of UTC at the instant of `server_time` (negative west
+            of it), daylight saving included. Local time = `server_time` +
+            this. May change between polls; always use the latest.
+          examples: [19800, 0, -14400]
 
     RealtimeLogin:
       type: object

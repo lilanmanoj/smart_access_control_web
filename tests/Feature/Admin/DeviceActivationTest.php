@@ -32,6 +32,7 @@ class DeviceActivationTest extends TestCase
         $uuid = (string) $this->postJson('/api/admin/v1/devices', [
             'device_id' => 'SMA_1234',
             'name' => 'Main Door',
+            'timezone' => 'Asia/Colombo',
         ])->assertCreated()->assertJsonPath('data.status', 'provisioned')->json('data.id');
 
         $issued = $this->postJson("/api/admin/v1/devices/{$uuid}/credentials")->assertCreated()->json();
