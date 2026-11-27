@@ -184,6 +184,32 @@ trades that away: the panel caches nothing and verifies through the API, losing
 offline access — which for a *backup* method may be exactly the wrong trade, so
 it is off by default.
 
+### The MQTT doorbell (device API 1.4.0)
+
+A panel cannot be pushed to over HTTPS, so it polls `/health` every 30 seconds.
+With `MQTT_ENABLED=true` the backend also rings the panel's doorbell on a
+Mosquitto broker (the `mosquitto` service) whenever it queues a command, and
+the panel fetches `GET /device-commands` at once: a remote unlock opens the
+door in a second or two, and a suspended member's finger stops working within
+seconds, because member and enrolment changes now queue a `sync_templates`
+for every panel in the tenant.
+
+The doorbell carries no data and no authority. Each panel gets its own broker
+login, issued (with a new password every time) in `POST /device-registrations`,
+that may only subscribe to its own topic. Every command is still fetched and
+acknowledged over the authenticated HTTPS API, and acknowledgements are
+idempotent. With the broker down, panels keep polling. Locally:
+
+```sh
+# in .env: MQTT_ENABLED=true and MQTT_PUBLIC_HOST=<your LAN IP>
+docker compose up -d mosquitto
+docker compose exec app php artisan mqtt:bootstrap
+docker compose exec app php artisan devices:test-command SMA_4821 unlock
+docker compose exec app php artisan devices:test-command SMA_4821 --doorbell
+```
+
+Production: [docs/deploy/aws-ec2.md](docs/deploy/aws-ec2.md), Part 12.
+
 ### Multi-tenancy
 
 Single database, `tenant_id` on every tenant-owned table, enforced by a global
@@ -258,6 +284,9 @@ tests/              Feature tests per device endpoint, isolation, replay
 | How is a device authenticated? | `app/Http/Middleware/AuthenticateDevice.php` |
 | Why does the trend chart not use red and green? | `resources/js/components/TrendChart.tsx` |
 | What settings can a tenant override? | `config/access.php` |
+| How does a command reach a panel within seconds? | `app/Services/Realtime/DeviceRealtime.php`, `app/Listeners/RingDeviceDoorbell.php` |
+| Why can a remote unlock never be delivered twice? | `DeviceCommandService::collectFor()` |
+| Which changes make the panels re-sync their templates? | `app/Services/TemplateSyncTrigger.php` and its callers |
 
 ---
 
@@ -289,6 +318,7 @@ Run by the `scheduler` container.
 | Command | When | What |
 |---|---|---|
 | `devices:detect-offline` | every minute | Marks a door dark after ~3 missed health polls |
+| `device-commands:expire` | every minute | Expires commands past their TTL, including for doors that have gone dark |
 | `otp:expire` | every 5 minutes | Closes out unused one-time passwords |
 | `backup-codes:rotate-stale` | nightly | Age-based rotation; off unless `BACKUP_CODE_MAX_AGE_DAYS` is set (0 recommended) |
 | `access-events:prune` | nightly | Applies `EVENT_RETENTION_DAYS` (unset = never) |

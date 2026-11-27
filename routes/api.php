@@ -91,14 +91,17 @@ Route::prefix('v1')
             ->middleware('throttle:device-access-events')
             ->name('device.access-events.store');
 
-        // Command queue.
+        // Command queue. Fetched when the MQTT doorbell rings (1.4.0); the
+        // same commands also ride on /health.
         Route::get('/device-commands', [DeviceCommandController::class, 'index'])
+            ->middleware('throttle:device-commands')
             ->name('device.commands.index');
         Route::post('/device-commands/{command}/acknowledgements', [DeviceCommandController::class, 'acknowledge'])
             ->name('device.commands.acknowledge');
 
         // First contact / fleet self-report.
         Route::post('/device-registrations', [DeviceRegistrationController::class, 'store'])
+            ->middleware('throttle:device-registrations')
             ->name('device.registrations.store');
     });
 

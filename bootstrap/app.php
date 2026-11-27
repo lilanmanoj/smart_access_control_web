@@ -142,6 +142,11 @@ return Application::configure(basePath: dirname(__DIR__))
                 $payload['error']['fields'] = $e->errors();
             }
 
-            return response()->json($payload, $status);
+            // Keep the exception's own headers. A 429 from the rate limiter
+            // carries Retry-After and the X-RateLimit-* pair, which a panel
+            // uses to back off (device API 1.4.0).
+            $headers = $e instanceof HttpExceptionInterface ? $e->getHeaders() : [];
+
+            return response()->json($payload, $status, $headers);
         });
     })->create();

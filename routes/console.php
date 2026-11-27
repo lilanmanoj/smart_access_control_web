@@ -20,6 +20,13 @@ Schedule::command('devices:detect-offline')
     ->everyMinute()
     ->withoutOverlapping();
 
+// Commands past their TTL, including those for panels that have gone dark and
+// will never poll to expire them. Keeps a missed remote unlock from showing as
+// "waiting" on the dashboard.
+Schedule::command('device-commands:expire')
+    ->everyMinute()
+    ->withoutOverlapping();
+
 // Housekeeping on abandoned one-time passwords.
 Schedule::command('otp:expire')
     ->everyFiveMinutes()

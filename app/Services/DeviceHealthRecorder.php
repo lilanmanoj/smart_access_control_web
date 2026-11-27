@@ -23,20 +23,34 @@ class DeviceHealthRecorder
     /**
      * @param  array<string, mixed>  $report  Optional device self-report:
      *                                        firmware_version, uptime_ms,
-     *                                        enrolled_count, template_capacity.
+     *                                        enrolled_count, template_capacity,
+     *                                        mqtt_connected, mqtt_reconnects.
      */
     public function record(Device $device, array $report = []): void
     {
         $now = CarbonImmutable::now();
         $wasOnline = $device->is_online;
 
-        $device->forceFill(array_filter([
+        $attributes = [
             'last_seen_at' => $now,
             'last_health_at' => $now,
             'is_online' => true,
             'firmware_version' => $report['firmware_version'] ?? $device->firmware_version,
             'template_capacity' => $report['template_capacity'] ?? $device->template_capacity,
-        ], fn ($value): bool => $value !== null))->saveQuietly();
+        ];
+
+        // Device API 1.4.0: the MQTT doorbell's state as the panel reports
+        // it. Only panels that report it get it recorded, so an older panel
+        // shows "not reported" rather than a misleading "not connected".
+        if (array_key_exists('mqtt_connected', $report) || array_key_exists('mqtt_reconnects', $report)) {
+            $attributes += [
+                'mqtt_connected' => $report['mqtt_connected'] ?? null,
+                'mqtt_reconnects' => $report['mqtt_reconnects'] ?? null,
+                'mqtt_reported_at' => $now,
+            ];
+        }
+
+        $device->forceFill(array_filter($attributes, fn ($value): bool => $value !== null))->saveQuietly();
 
         $this->extendOrOpenRun($device, 'online', $now, $report);
 

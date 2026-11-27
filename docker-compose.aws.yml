@@ -1,7 +1,8 @@
 # Smart Access Control — single-instance AWS deployment (EC2 + Docker).
 #
-# Everything the system needs runs on one box: Caddy as the public entrance,
-# the four application roles, Redis and MySQL. See docs/deploy/aws-ec2.md.
+# Everything the system needs runs on one box: Caddy as the public entrance
+# for HTTP(S), Mosquitto as the entrance for the panels' MQTT doorbell, the
+# four application roles, Redis and MySQL. See docs/deploy/aws-ec2.md.
 #
 #   APP_IMAGE=<account>.dkr.ecr.<region>.amazonaws.com/smart-access-control:<sha>
 #   docker compose --env-file compose.env -f docker-compose.aws.yml up -d
@@ -125,6 +126,37 @@ services:
         condition: service_healthy
 
   # ---------------------------------------------------------------------------
+  # Mosquitto — the panels' MQTT doorbell (device API 1.4.0). The only
+  # container besides Caddy with a published port: raw MQTT over plain TCP on
+  # 1883, which Caddy (an HTTP server) cannot carry. Open 1883 in the security
+  # group. The doorbell carries no data or authority; see config/access.php.
+  #
+  # It reads the same .env as the application for MQTT_ADMIN_USERNAME and
+  # MQTT_ADMIN_PASSWORD, used once, on first boot, to create the admin login.
+  # Nothing depends on it: with the broker down, panels fall back to /health.
+  # ---------------------------------------------------------------------------
+  mosquitto:
+    image: eclipse-mosquitto:2.0.20
+    entrypoint: ["sh", "/docker-entrypoint-sac.sh"]
+    env_file: .env
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./docker/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./docker/mosquitto/entrypoint.sh:/docker-entrypoint-sac.sh:ro
+      - mosquitto-data:/mosquitto/data
+    # About 5 MB resident for a small fleet; the cap only stops a runaway.
+    mem_limit: 64m
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -u \"$$MQTT_ADMIN_USERNAME\" -P \"$$MQTT_ADMIN_PASSWORD\" -t '$$SYS/broker/version' -C 1 -W 5 >/dev/null"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    logging: *logging
+
+  # ---------------------------------------------------------------------------
   # MySQL — on this instance, not RDS. Backed up by aws/backup-mysql.sh to S3
   # nightly and by EBS snapshots daily. Moving to RDS later is a DB_HOST
   # change in .env and deleting this service.
@@ -176,3 +208,4 @@ volumes:
   redis-data:
   caddy-data:
   caddy-config:
+  mosquitto-data:
