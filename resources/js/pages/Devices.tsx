@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api, ensureCsrfCookie, toApiError, type ApiError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import { deviceKeys } from '@/lib/devices';
 import { useTenantOptions } from '@/lib/tenants';
 import { formatRelative } from '@/lib/format';
 import { DeviceStateBadge } from '@/components/status';
@@ -46,7 +47,7 @@ export function DevicesPage() {
         : (user?.tenant?.timezone ?? null);
 
     const { data, isPending, error, refetch } = useQuery({
-        queryKey: ['devices', search],
+        queryKey: deviceKeys.list(search),
         queryFn: async () => {
             const { data } = await api.get<Paginated<Device>>('/devices', {
                 params: { search: search || undefined, per_page: 50 },
