@@ -4,6 +4,7 @@ import { api, ensureCsrfCookie, toApiError, type ApiError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { formatDay, formatNumber } from '@/lib/format';
 import { TenantStatusBadge } from '@/components/status';
+import { TimezoneSelect, browserTimezone } from '@/components/TimezoneSelect';
 import {
     Button,
     EmptyState,
@@ -53,6 +54,7 @@ type SettingChoice = '' | 'on' | 'off';
 interface TenantPayload {
     name: string;
     slug?: string;
+    timezone: string;
     settings: Record<string, Record<string, boolean | null>>;
 }
 
@@ -195,8 +197,8 @@ export function TenantsPage() {
                         submitLabel="Save changes"
                         pending={update.isPending}
                         error={update.error ? toApiError(update.error) : null}
-                        onSubmit={({ name, settings }) =>
-                            update.mutate({ id: editing.id, payload: { name, settings } })
+                        onSubmit={({ name, timezone, settings }) =>
+                            update.mutate({ id: editing.id, payload: { name, timezone, settings } })
                         }
                     />
                 </Panel>
@@ -265,6 +267,7 @@ export function TenantsPage() {
                                 <tr>
                                     <Th>Tenant</Th>
                                     <Th>Status</Th>
+                                    <Th>Timezone</Th>
                                     <Th className="text-right">Devices</Th>
                                     <Th className="text-right">Members</Th>
                                     <Th className="text-right">Operators</Th>
@@ -294,6 +297,9 @@ export function TenantsPage() {
                                             </Td>
                                             <Td>
                                                 <TenantStatusBadge status={tenant.status} />
+                                            </Td>
+                                            <Td style={{ color: tenant.timezone ? 'var(--text-muted)' : 'var(--warn-text)' }}>
+                                                {tenant.timezone ?? 'Not set'}
                                             </Td>
                                             <Td className="text-right tabular-nums">
                                                 {formatNumber(tenant.devices_count ?? 0)}
@@ -400,6 +406,9 @@ function TenantForm({
     const [slug, setSlug] = useState(tenant?.slug ?? '');
     // Follows the name until the operator types a slug of their own.
     const [slugEdited, setSlugEdited] = useState(false);
+    // A new tenant starts from the operator's own timezone. An existing one
+    // without a timezone starts empty, so saving it is a deliberate choice.
+    const [timezone, setTimezone] = useState(tenant ? (tenant.timezone ?? '') : browserTimezone());
     const [settings, setSettings] = useState<Record<string, SettingChoice>>(() =>
         Object.fromEntries(SETTINGS.map(({ key, group, field }) => [key, readSetting(tenant, group, field)])),
     );
@@ -412,7 +421,7 @@ function TenantForm({
             onSubmit={(event) => {
                 event.preventDefault();
 
-                const payload: TenantPayload = { name, settings: {} };
+                const payload: TenantPayload = { name, timezone, settings: {} };
 
                 for (const { key, group, field } of SETTINGS) {
                     const choice = settings[key] ?? '';
@@ -465,6 +474,19 @@ function TenantForm({
                     }}
                     style={editing ? { background: 'var(--surface-sunken)', color: 'var(--text-muted)' } : undefined}
                 />
+            </Field>
+
+            <Field
+                id="tenant_timezone"
+                label="Timezone"
+                hint={
+                    editing && !tenant?.timezone
+                        ? 'Not set yet. Choose one to save this tenant.'
+                        : "Where this site is. New devices in this tenant start from it."
+                }
+                error={error?.fieldError('timezone')}
+            >
+                <TimezoneSelect id="tenant_timezone" required value={timezone} onChange={setTimezone} />
             </Field>
 
             <fieldset className="grid gap-3 sm:col-span-2 sm:grid-cols-3">

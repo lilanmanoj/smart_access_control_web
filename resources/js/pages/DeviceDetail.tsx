@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
-import { api, ensureCsrfCookie, toApiError } from '@/lib/api';
+import { api, ensureCsrfCookie, toApiError, type ApiError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { formatDateTime, formatRelative, humanise } from '@/lib/format';
 import {
@@ -13,11 +13,14 @@ import {
     EnrollmentStatusBadge,
     TemplateSyncBadge,
 } from '@/components/status';
+import { TimezoneSelect } from '@/components/TimezoneSelect';
 import {
     Badge,
     Button,
     EmptyState,
     ErrorState,
+    Field,
+    Input,
     LoadingRows,
     Panel,
     TableWrap,
@@ -36,6 +39,7 @@ export function DeviceDetailPage() {
     const queryClient = useQueryClient();
     const [issuedCodes, setIssuedCodes] = useState<string[] | null>(null);
     const [unlockCommandId, setUnlockCommandId] = useState<string | null>(null);
+    const [editingDetails, setEditingDetails] = useState(false);
     const [issuedCredential, setIssuedCredential] = useState<{
         device_id: string;
         api_key: string;
@@ -122,6 +126,18 @@ export function DeviceDetailPage() {
         onSuccess: invalidate,
     });
 
+    const saveDetails = useMutation({
+        mutationFn: async (payload: DeviceDetailsPayload) => {
+            await ensureCsrfCookie();
+            await api.patch(`/devices/${deviceId}`, payload);
+        },
+        onSuccess: () => {
+            setEditingDetails(false);
+            invalidate();
+            void queryClient.invalidateQueries({ queryKey: ['devices'] });
+        },
+    });
+
     // The device API admits only an active panel. A new one starts
     // provisioned and stays refused until somebody decides to let it in;
     // deactivating is the same switch in the other direction.
@@ -174,6 +190,17 @@ export function DeviceDetailPage() {
                 </div>
 
                 <div className="flex flex-wrap gap-2">
+                    {can('device.update') && (
+                        <Button
+                            variant="ghost"
+                            onClick={() => {
+                                saveDetails.reset();
+                                setEditingDetails((open) => !open);
+                            }}
+                        >
+                            {editingDetails ? 'Cancel editing' : 'Edit details'}
+                        </Button>
+                    )}
                     {can('device.update') && device.status !== 'active' && (
                         <Button
                             variant="primary"
@@ -238,6 +265,29 @@ export function DeviceDetailPage() {
                     {device.status === 'provisioned'
                         ? 'This door is not activated yet. The portal refuses it until you press Activate, so its status bar shows "No service".'
                         : 'This door is deactivated. The portal refuses it, so OTP and backup codes do not work there. Press Activate to let it back in.'}
+                </p>
+            )}
+
+            {editingDetails && (
+                <Panel title="Device details" className="p-4">
+                    <DeviceDetailsForm
+                        device={device}
+                        pending={saveDetails.isPending}
+                        error={saveDetails.error ? toApiError(saveDetails.error) : null}
+                        onSubmit={(payload) => saveDetails.mutate(payload)}
+                    />
+                </Panel>
+            )}
+
+            {device.timezone === null && !editingDetails && can('device.update') && (
+                <p
+                    role="status"
+                    className="panel px-4 py-2 text-xs"
+                    style={{ borderColor: 'var(--warn)', color: 'var(--warn-text)' }}
+                >
+                    <span aria-hidden="true">! </span>
+                    This door has no timezone yet. Press <strong>Edit details</strong> to set one
+                    {device.tenant?.timezone ? ` (the tenant's is ${device.tenant.timezone})` : ''}.
                 </p>
             )}
 
@@ -312,6 +362,7 @@ export function DeviceDetailPage() {
                         <Row label="Last seen" value={formatDateTime(device.last_seen_at)} />
                         <Row label="Firmware" value={device.firmware_version ?? 'Unknown'} />
                         <Row label="Realtime" value={<RealtimeState device={device} />} />
+                        <Row label="Timezone" value={device.timezone ?? 'Not set'} />
                         <Row
                             label="Templates stored"
                             value={`${device.enrolled_count} of ${device.template_capacity}`}
@@ -708,6 +759,85 @@ function downloadCodes(deviceName: string, codes: string[]): void {
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
+}
+
+interface DeviceDetailsPayload {
+    name: string;
+    location: string | null;
+    timezone: string;
+}
+
+/**
+ * Name, location and timezone. A device with no timezone yet starts from its
+ * tenant's, which the operator can keep or change.
+ */
+function DeviceDetailsForm({
+    device,
+    pending,
+    error,
+    onSubmit,
+}: {
+    device: Device;
+    pending: boolean;
+    error: ApiError | null;
+    onSubmit(payload: DeviceDetailsPayload): void;
+}) {
+    const tenantTimezone = device.tenant?.timezone ?? null;
+    const [name, setName] = useState(device.name);
+    const [location, setLocation] = useState(device.location ?? '');
+    const [timezone, setTimezone] = useState(device.timezone ?? tenantTimezone ?? '');
+
+    let hint = "Where this door is. Usually the tenant's; change it for a door somewhere else.";
+
+    if (device.timezone === null) {
+        hint = tenantTimezone
+            ? `Not set yet, so the tenant's (${tenantTimezone}) is selected. Save to keep it.`
+            : 'Not set yet, and the tenant has none either. Choose one.';
+    }
+
+    return (
+        <form
+            className="grid gap-3 sm:grid-cols-3"
+            onSubmit={(event) => {
+                event.preventDefault();
+                onSubmit({ name, location: location === '' ? null : location, timezone });
+            }}
+        >
+            <Field id="device_name" label="Name" error={error?.fieldError('name')}>
+                <Input
+                    id="device_name"
+                    required
+                    maxLength={120}
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                />
+            </Field>
+
+            <Field id="device_location" label="Location" error={error?.fieldError('location')}>
+                <Input
+                    id="device_location"
+                    maxLength={160}
+                    value={location}
+                    onChange={(event) => setLocation(event.target.value)}
+                />
+            </Field>
+
+            <Field id="device_timezone" label="Timezone" hint={hint} error={error?.fieldError('timezone')}>
+                <TimezoneSelect id="device_timezone" required value={timezone} onChange={setTimezone} />
+            </Field>
+
+            <div className="sm:col-span-3">
+                <Button type="submit" variant="primary" loading={pending}>
+                    Save details
+                </Button>
+                {error && Object.keys(error.fields).length === 0 && (
+                    <span role="alert" className="ml-3 text-xs" style={{ color: 'var(--danger-text)' }}>
+                        {error.message}
+                    </span>
+                )}
+            </div>
+        </form>
+    );
 }
 
 /**

@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api, toApiError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import { useDeviceOptions } from '@/lib/devices';
 import { getEcho } from '@/lib/echo';
 import { realtimeAvailable } from '@/lib/config';
 import { formatDateTime } from '@/lib/format';
@@ -19,7 +20,7 @@ import {
     Td,
     Th,
 } from '@/components/ui';
-import type { AccessEvent, CursorPaginated, Device } from '@/types';
+import type { AccessEvent, CursorPaginated } from '@/types';
 
 interface Filters {
     device_id: string;
@@ -70,15 +71,7 @@ export function AccessEventsPage() {
         },
     });
 
-    const devicesQuery = useQuery({
-        queryKey: ['devices', ''],
-        queryFn: async () => {
-            const { data } = await api.get('/devices', { params: { per_page: 100 } });
-
-            return data.data as Device[];
-        },
-        enabled: can('device.view'),
-    });
+    const devicesQuery = useDeviceOptions();
 
     const tenantUuid = user?.tenant?.id ?? null;
 

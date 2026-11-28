@@ -29,6 +29,8 @@ export interface Tenant {
     name: string;
     slug: string;
     status: TenantStatus;
+    /** IANA name. Null only for a tenant not edited since timezones were added. */
+    timezone: string | null;
     settings: Record<string, unknown>;
     devices_count?: number;
     members_count?: number;
@@ -57,6 +59,8 @@ export interface Device {
     device_id: string;
     name: string;
     location: string | null;
+    /** IANA name. Null only for a device not edited since timezones were added. */
+    timezone: string | null;
     /** Administrative state — distinct from whether it is currently answering. */
     status: DeviceStatus;
     /** Whether it is inside its health-poll window right now. */
@@ -77,7 +81,7 @@ export interface Device {
     enrolled_count: number;
     metadata: Record<string, unknown> | null;
     /** Only sent on cross-tenant views; an operator inside one tenant knows. */
-    tenant?: { id: string; name: string };
+    tenant?: { id: string; name: string; timezone: string | null };
     active_backup_code_set?: BackupCodeSet | null;
     pending_commands?: DeviceCommand[];
     credentials?: DeviceCredential[];

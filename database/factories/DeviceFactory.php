@@ -23,6 +23,7 @@ class DeviceFactory extends Factory
             'device_id' => 'SMA_'.fake()->unique()->numberBetween(1000, 9999),
             'name' => fake()->streetName().' Door',
             'location' => fake()->secondaryAddress(),
+            'timezone' => 'Asia/Colombo',
             'status' => DeviceStatus::Active,
             'firmware_version' => '1.4.2',
             'template_capacity' => 200,

@@ -3,9 +3,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api, ensureCsrfCookie, toApiError, type ApiError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import { deviceKeys } from '@/lib/devices';
 import { useTenantOptions } from '@/lib/tenants';
 import { formatRelative } from '@/lib/format';
 import { DeviceStateBadge } from '@/components/status';
+import { TimezoneSelect } from '@/components/TimezoneSelect';
 import {
     Button,
     EmptyState,
@@ -38,8 +40,14 @@ export function DevicesPage() {
 
     const tenantsQuery = useTenantOptions();
 
+    // The timezone of the tenant a new device lands in when none is picked:
+    // the one switched into, or the operator's own.
+    const boundTenantTimezone = impersonatedTenantId
+        ? (tenantsQuery.data?.find((tenant) => tenant.id === impersonatedTenantId)?.timezone ?? null)
+        : (user?.tenant?.timezone ?? null);
+
     const { data, isPending, error, refetch } = useQuery({
-        queryKey: ['devices', search],
+        queryKey: deviceKeys.list(search),
         queryFn: async () => {
             const { data } = await api.get<Paginated<Device>>('/devices', {
                 params: { search: search || undefined, per_page: 50 },
@@ -50,12 +58,7 @@ export function DevicesPage() {
     });
 
     const create = useMutation({
-        mutationFn: async (payload: {
-            device_id: string;
-            name: string;
-            location: string;
-            tenant_id?: string;
-        }) => {
+        mutationFn: async (payload: DevicePayload) => {
             await ensureCsrfCookie();
             await api.post('/devices', payload);
         },
@@ -100,6 +103,7 @@ export function DevicesPage() {
                         // Pre-selected when they have switched into a tenant;
                         // an explicit choice when they are viewing them all.
                         defaultTenantId={impersonatedTenantId ?? ''}
+                        boundTenantTimezone={boundTenantTimezone}
                         tenantRequired={inFleetView}
                         pending={create.isPending}
                         error={create.error ? toApiError(create.error) : null}
@@ -197,9 +201,18 @@ export function DevicesPage() {
     );
 }
 
+interface DevicePayload {
+    device_id: string;
+    name: string;
+    location: string;
+    timezone: string;
+    tenant_id?: string;
+}
+
 function AddDeviceForm({
     tenants,
     defaultTenantId,
+    boundTenantTimezone,
     tenantRequired,
     pending,
     error,
@@ -208,22 +221,27 @@ function AddDeviceForm({
     /** Empty unless the operator holds `tenant.manage`. */
     tenants: Tenant[];
     defaultTenantId: string;
+    /** The timezone of the tenant used when no tenant is picked. */
+    boundTenantTimezone: string | null;
     tenantRequired: boolean;
     pending: boolean;
     error: ApiError | null;
-    onSubmit(payload: {
-        device_id: string;
-        name: string;
-        location: string;
-        tenant_id?: string;
-    }): void;
+    onSubmit(payload: DevicePayload): void;
 }) {
     const [deviceId, setDeviceId] = useState('');
     const [name, setName] = useState('');
     const [location, setLocation] = useState('');
     const [tenantId, setTenantId] = useState(defaultTenantId);
+    // null until the operator picks one: until then the field follows the
+    // tenant's timezone, including when they switch tenant.
+    const [chosenTimezone, setChosenTimezone] = useState<string | null>(null);
 
     const showTenantPicker = tenants.length > 0;
+
+    const tenantTimezone = tenantId
+        ? (tenants.find((tenant) => tenant.id === tenantId)?.timezone ?? null)
+        : boundTenantTimezone;
+    const timezone = chosenTimezone ?? tenantTimezone ?? '';
 
     return (
         <form
@@ -234,6 +252,7 @@ function AddDeviceForm({
                     device_id: deviceId.trim(),
                     name,
                     location,
+                    timezone,
                     // Omitted entirely when not chosen, so the request falls
                     // back to the operator's own bound tenant.
                     ...(tenantId ? { tenant_id: tenantId } : {}),
@@ -300,6 +319,19 @@ function AddDeviceForm({
                     value={location}
                     onChange={(event) => setLocation(event.target.value)}
                 />
+            </Field>
+
+            <Field
+                id="timezone"
+                label="Timezone"
+                hint={
+                    tenantTimezone
+                        ? `Defaults to the tenant's (${tenantTimezone}); change it for a door somewhere else.`
+                        : 'This tenant has no timezone yet, so choose one for the door.'
+                }
+                error={error?.fieldError('timezone')}
+            >
+                <TimezoneSelect id="timezone" required value={timezone} onChange={setChosenTimezone} />
             </Field>
 
             <div className="sm:col-span-3">

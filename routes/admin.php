@@ -16,6 +16,7 @@ use App\Http\Controllers\Admin\InvitationAcceptanceController;
 use App\Http\Controllers\Admin\MemberController;
 use App\Http\Controllers\Admin\OtpRequestController;
 use App\Http\Controllers\Admin\TenantController;
+use App\Http\Controllers\Admin\TimezoneController;
 use App\Http\Controllers\Admin\UserController;
 use App\Http\Controllers\Admin\WebhookEndpointController;
 use Illuminate\Support\Facades\Route;
@@ -66,6 +67,10 @@ Route::prefix('admin/v1')->name('admin.')->group(function (): void {
 
         Route::get('/dashboard/summary', [DashboardController::class, 'summary'])
             ->name('dashboard.summary');
+
+        // The choices for a tenant's or device's timezone: reference data,
+        // open to every signed-in operator.
+        Route::get('/timezones', TimezoneController::class)->name('timezones.index');
 
         // -----------------------------------------------------------------
         // Devices
